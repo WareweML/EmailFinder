@@ -1,0 +1,20 @@
+# 100-wide Chromium farm. ~30–50GB RAM. Pair with r6i.4xlarge (~$1/hr).
+# Scale-out: launch N copies behind an NLB, same image.
+services:
+  browserless:
+    image: ghcr.io/browserless/chromium:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      CONCURRENT: ${CONCURRENT:-100}
+      QUEUED: ${QUEUED:-200}
+      TIMEOUT: ${TIMEOUT:-30000}
+      TOKEN: ${BROWSERLESS_TOKEN:-mailgraph}
+      HEALTH: "true"
+    shm_size: "4gb"
+    mem_limit: ${MEM_LIMIT:-56g}
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535

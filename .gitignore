@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.tanstack/
+.vercel/
+.grok/
+artifacts/
+attachments/
+screenshots/
+data/
+.env
+.env.local
+*.log
+.DS_Store
+AGENTS.md
+AGENTS.project.md
