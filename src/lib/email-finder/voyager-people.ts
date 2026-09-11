@@ -7,6 +7,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 const SESSION_FILE = "/workspace/data/li-session.json";
 
 function loadSession(): { liAt: string; jsession: string } | null {
+  if (process.env.LI_USE_SESSION !== "1") return null;
   const liAt = process.env.LI_AT;
   const jsession = process.env.LI_JSESSIONID;
   if (liAt && jsession) return { liAt, jsession };
@@ -81,16 +82,13 @@ export async function voyagerCompany(
 ): Promise<VoyagerCompany | null> {
   const sess = loadSession();
   if (!sess) return null;
-  const res = await fetch(
+  const { liGet } = await import("./linkedin-http");
+  const res = await liGet(
     `https://www.linkedin.com/voyager/api/organization/companies/${encodeURIComponent(companyId)}`,
-    {
-      redirect: "manual",
-      signal: AbortSignal.timeout(15_000),
-      headers: headers(sess, "https://www.linkedin.com/company/"),
-    },
+    "https://www.linkedin.com/company/",
   );
   if (res.status !== 200) return null;
-  const j = (await res.json()) as {
+  const j = JSON.parse(res.body) as {
     data?: Record<string, unknown>;
     included?: Array<Record<string, unknown>>;
   };
@@ -136,15 +134,12 @@ export async function voyagerPeopleSearch(
     "&origin=FACETED_SEARCH&q=all" +
     `&query=(keywords:${encodeURIComponent(kw)},flagshipSearchIntent:SEARCH_SRP,queryParameters:(${facets}),includeFiltersInResponse:false)` +
     `&count=${count}&start=${start}`;
-  const res = await fetch(url, {
-    redirect: "manual",
-    signal: AbortSignal.timeout(20_000),
-    headers: headers(sess, "https://www.linkedin.com/search/results/people/"),
-  });
+  const { liGet } = await import("./linkedin-http");
+  const res = await liGet(url, "https://www.linkedin.com/search/results/people/");
   if (res.status !== 200) {
     return { hits: [], total: 0, detail: `voyager ${res.status}` };
   }
-  const j = (await res.json()) as {
+  const j = JSON.parse(res.body) as {
     data?: { metadata?: { totalResultCount?: number } };
     included?: Array<Record<string, unknown>>;
   };

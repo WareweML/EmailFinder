@@ -1,7 +1,12 @@
 /**
- * TheOrg public SSR — cookieless org chart + team pages.
- * GHD live: 7,829 positions, 125 teams, 50 named people per team.
+ * TheOrg public SSR — independent of LinkedIn.
+ * Rotating Okk residential IPs so we can fan out orgs + teams.
  */
+
+import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { promisify } from "node:util";
 
 export type TheOrgHit = {
   name: string;
@@ -9,24 +14,94 @@ export type TheOrgHit = {
   slug: string;
   url: string;
   team?: string;
+  company?: string;
+  domain?: string;
+  linkedinUrl?: string;
+  location?: string;
 };
+const execFileAsync = promisify(execFile);
 
 const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-async function nextProps(url: string): Promise<Record<string, unknown> | null> {
+function env(key: string): string {
+  if (process.env[key]) return process.env[key]!;
+  try {
+    const m = readFileSync("/workspace/.env", "utf8").match(
+      new RegExp(`^${key}=(.*)$`, "m"),
+    );
+    return m?.[1]?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+type ProxyAuth = { host: string; port: string; user: string; pass: string };
+let proxyBase: ProxyAuth | null | undefined;
+
+async function loadProxy(): Promise<ProxyAuth | null> {
+  if (proxyBase !== undefined) return proxyBase;
+  const url = env("OKK_PROXY_CONFIG_URL_BING") || env("OKK_PROXY_CONFIG_URL");
+  if (!url) {
+    proxyBase = null;
+    return null;
+  }
   try {
     const res = await fetch(url, {
-      signal: AbortSignal.timeout(8_000),
-      headers: { "User-Agent": UA, Accept: "text/html" },
-      redirect: "follow",
+      signal: AbortSignal.timeout(4000),
+      headers: { Accept: "text/plain" },
     });
-    if (!res.ok) return null;
-    const html = await res.text();
-    const m = html.match(
-      /<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/,
-    );
-    if (!m) return null;
+    const text = await res.text();
+    const line = text
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l.includes(":") && !l.startsWith("#"));
+    if (!line) {
+      proxyBase = null;
+      return null;
+    }
+    const parts = line.split(":");
+    proxyBase = {
+      host: parts[0]!,
+      port: parts[1]!,
+      user: parts[2]!,
+      pass: parts.slice(3).join(":"),
+    };
+    return proxyBase;
+  } catch {
+    proxyBase = null;
+    return null;
+  }
+}
+
+async function fetchHtml(url: string): Promise<string | null> {
+  const proxy = await loadProxy();
+  const sid = randomBytes(3).toString("hex");
+  try {
+    const args = ["-sS", "-m", "10", "-L", "--max-redirs", "2", "--compressed", "-A", UA];
+    if (proxy) {
+      const user = `${proxy.user.replace(/-sid-[a-z0-9]+$/i, "")}-sid-${sid}`;
+      args.push("-x", `http://${user}:${proxy.pass}@${proxy.host}:${proxy.port}`);
+    }
+    args.push(url);
+    const { stdout } = await execFileAsync("curl", args, {
+      maxBuffer: 2_000_000,
+      timeout: 12_000,
+    });
+    return stdout.length > 800 ? stdout : null;
+  } catch {
+    return null;
+  }
+}
+
+async function nextProps(url: string): Promise<Record<string, unknown> | null> {
+  const html = await fetchHtml(url);
+  if (!html) return null;
+  const m = html.match(
+    /<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/,
+  );
+  if (!m) return null;
+  try {
     const j = JSON.parse(m[1]!) as {
       props?: { pageProps?: Record<string, unknown> };
     };
@@ -41,10 +116,12 @@ function walkPeople(
   out: TheOrgHit[],
   seen: Set<string>,
   team?: string,
+  company?: string,
+  domain?: string,
 ) {
   if (!node) return;
   if (Array.isArray(node)) {
-    for (const x of node) walkPeople(x, out, seen, team);
+    for (const x of node) walkPeople(x, out, seen, team, company, domain);
     return;
   }
   if (typeof node !== "object") return;
@@ -52,20 +129,35 @@ function walkPeople(
   const name = typeof o.fullName === "string" ? o.fullName : undefined;
   const role = typeof o.role === "string" ? o.role : undefined;
   const slug = typeof o.slug === "string" ? o.slug : undefined;
+  const li =
+    (typeof o.linkedinUrl === "string" && o.linkedinUrl) ||
+    (typeof o.linkedin === "string" && o.linkedin) ||
+    (typeof o.linkedInUrl === "string" && o.linkedInUrl) ||
+    undefined;
+  const loc =
+    (typeof o.location === "string" && o.location) ||
+    (typeof o.city === "string" && o.city) ||
+    (typeof o.geo === "string" && o.geo) ||
+    (typeof o.officeName === "string" && o.officeName) ||
+    undefined;
   if (name && slug && name.split(/\s+/).length >= 2 && !seen.has(slug)) {
     seen.add(slug);
     out.push({
       name,
       title: role,
       slug,
-      url: `https://theorg.com/org/_/p/${slug}`,
+      url: li && /linkedin\.com\/in\//i.test(li) ? li : `https://theorg.com/org/_/p/${slug}`,
       team,
+      company,
+      domain,
+      location: loc,
+      linkedinUrl: li && /linkedin\.com\/in\//i.test(li) ? li.split("?")[0] : undefined,
     });
   }
   const nestedTeam =
     typeof o.name === "string" && o.__typename === "Team" ? o.name : team;
   for (const v of Object.values(o)) {
-    if (v && typeof v === "object") walkPeople(v, out, seen, nestedTeam);
+    if (v && typeof v === "object") walkPeople(v, out, seen, nestedTeam, company, domain);
   }
 }
 
@@ -82,111 +174,332 @@ function slugCandidates(domain: string, companyName: string): string[] {
   );
 }
 
-export async function theOrgPeople(
-  domain: string,
-  companyName: string,
-): Promise<{ hits: TheOrgHit[]; positions: number; teams: number; slug?: string }> {
-  let props: Record<string, unknown> | null = null;
-  let slug: string | undefined;
-  for (const s of slugCandidates(domain, companyName)) {
-    props = await nextProps(`https://theorg.com/org/${s}`);
-    if (props?.initialCompany) {
-      slug = s;
-      break;
-    }
-  }
-  if (!props || !slug) return { hits: [], positions: 0, teams: 0 };
+const TEAM_GUESSES = [
+  "engineering",
+  "product",
+  "marketing",
+  "sales",
+  "finance",
+  "operations",
+  "people",
+  "human-resources",
+  "legal",
+  "research",
+  "academic-affairs",
+  "faculty",
+  "admissions",
+  "student-affairs",
+  "communications",
+  "information-technology",
+  "advancement",
+  "leadership",
+  "executive",
+  "education",
+];
 
-  const hits: TheOrgHit[] = [];
-  const seen = new Set<string>();
-  walkPeople(props, hits, seen);
-
-  const company = props.initialCompany as {
-    stats?: { positionCount?: number; teamsCount?: number };
-    offices?: Array<{ slug?: string }>;
-  };
-  const teams = (props.initialTeams as Array<{ slug?: string }> | undefined) ?? [];
-  const extra = new Set<string>();
-  for (const t of teams) if (t.slug) extra.add(`/org/${slug}/teams/${t.slug}`);
-  for (const o of company.offices ?? []) {
-    if (o.slug) extra.add(`/org/${slug}/offices/${o.slug}`);
-  }
-
-  const { decodoShards } = await import("./decodo-serp");
-  const teamQueries = [
-    `site:theorg.com/org/${slug}/teams/`,
-    `site:theorg.com/org/${slug}/teams/ engineer`,
-    `site:theorg.com/org/${slug}/teams/ water`,
-    `site:theorg.com/org/${slug}/teams/ marketing`,
-    `site:theorg.com/org/${slug}/teams/ finance`,
-    `site:theorg.com/org/${slug}/teams/ sales`,
-    `site:theorg.com/org/${slug}/teams/ digital`,
-    `site:theorg.com/org/${slug}/offices/`,
-  ];
-  const guessed = [
-    "advisory-services",
-    "proposal-management",
-    "risk-management",
-    "executive-support",
-    "hydrogeology-department",
-    "consulting-services",
-    "environmental-engineering",
-    "environmental-team",
-    "sustainability-services",
-    "mechanical-engineering",
-    "structural-engineering",
-    "geotechnical",
-    "water",
-    "transportation",
-    "digital",
-    "finance",
-    "human-resources",
-    "marketing",
-    "legal",
-    "information-technology",
-    "operations",
-    "health-safety",
-    "asset-management",
-    "architecture",
-    "planning",
-    "coastal",
-    "marine",
-    "power",
-    "mining",
-    "buildings",
-  ];
-  for (const g of guessed) extra.add(`/org/${slug}/teams/${g}`);
+async function allTeamSlugs(
+  slug: string,
+  seed: string[],
+): Promise<string[]> {
+  const seen = new Set(seed.map((s) => s.toLowerCase()).filter(Boolean));
   try {
-    const pages = await decodoShards(teamQueries);
+    const { decodoShards } = await import("./decodo-serp");
+    const letters = "abcdefghijklmnopqrstuvwxyz".split("");
+    const qs = [
+      `site:theorg.com/org/${slug}/teams`,
+      ...letters.map((l) => `site:theorg.com/org/${slug}/teams/${l}`),
+    ];
+    const pages = await decodoShards(qs);
+    const re = new RegExp(`/org/${slug}/teams/([a-z0-9\\-]+)`, "i");
     for (const rows of pages) {
       for (const row of rows) {
-        const m = (row.link ?? "").match(
-          /theorg\.com(\/org\/[^/]+\/(?:teams|offices)\/[a-z0-9\-]+)/i,
-        );
-        if (m) extra.add(m[1]!);
+        const m = (row.link ?? "").match(re);
+        if (m?.[1]) seen.add(m[1].toLowerCase());
       }
     }
   } catch {
     /* optional */
   }
+  return [...seen];
+}
 
-  const paths = [...extra].slice(0, 36);
+function websiteHost(co: Record<string, unknown>): string | undefined {
+  const social = co.social as { websiteUrl?: string } | undefined;
+  const raw = social?.websiteUrl || (typeof co.domain === "string" ? co.domain : "") || "";
+  return raw
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .split("/")[0]
+    ?.toLowerCase();
+}
+
+async function peopleFromSlug(
+  slug: string,
+  maxTeams = 160,
+  deadline = 0,
+  expectDomain?: string,
+): Promise<{ hits: TheOrgHit[]; related: Array<{ name: string; domain?: string }> }> {
+  if (deadline && Date.now() > deadline) return { hits: [], related: [] };
+  const props = await nextProps(`https://theorg.com/org/${slug}`);
+  if (!props?.initialCompany) return { hits: [], related: [] };
+  const co = props.initialCompany as {
+    name?: string;
+    domain?: string;
+    website?: string;
+    url?: string;
+    offices?: Array<{ slug?: string }>;
+    social?: { websiteUrl?: string };
+  };
+  const host = websiteHost(co as Record<string, unknown>);
+  if (
+    expectDomain &&
+    host &&
+    host !== expectDomain.replace(/^www\./, "").toLowerCase() &&
+    !host.endsWith(`.${expectDomain}`)
+  ) {
+    return { hits: [], related: [] };
+  }
+  const company = co.name;
+  const domain = host && host.includes(".") ? host : undefined;
+  const hits: TheOrgHit[] = [];
+  const seen = new Set<string>();
+  walkPeople(props, hits, seen, undefined, company, domain);
+  const teams = (props.initialTeams as Array<{ slug?: string }> | undefined) ?? [];
+  const offices = (co.offices ?? []).map((o) => o.slug).filter(Boolean) as string[];
+  const relatedRaw = (props.relatedCompanies as Array<{ name?: string; social?: { websiteUrl?: string } }>) ?? [];
+  const related = relatedRaw
+    .map((r) => ({
+      name: r.name ?? "",
+      domain: websiteHost(r as unknown as Record<string, unknown>),
+    }))
+    .filter((r) => r.name);
+
+  const extra = await allTeamSlugs(
+    slug,
+    [...teams.map((t) => t.slug || ""), ...TEAM_GUESSES],
+  );
+  const paths = [
+    ...extra.slice(0, maxTeams).map((ts) => `/org/${slug}/teams/${ts}`),
+    ...offices.map((s) => `/org/${slug}/offices/${s}`),
+  ];
   let i = 0;
-  const width = 6;
   await Promise.all(
-    Array.from({ length: width }, async () => {
-      while (i < paths.length) {
+    Array.from({ length: Math.min(16, paths.length || 1) }, async () => {
+      while (i < paths.length && (!deadline || Date.now() < deadline)) {
         const path = paths[i++]!;
         const page = await nextProps(`https://theorg.com${path}`);
-        if (page) walkPeople(page, hits, seen);
+        if (page) walkPeople(page, hits, seen, undefined, company, domain);
+      }
+    }),
+  );
+  return { hits, related };
+}
+
+let featuredCache: { at: number; items: Array<{ name: string; slug: string }> } | null =
+  null;
+
+async function featuredOrgs(): Promise<Array<{ name: string; slug: string }>> {
+  if (featuredCache && Date.now() - featuredCache.at < 6 * 3600_000) {
+    return featuredCache.items;
+  }
+  const props = await nextProps("https://theorg.com/companies");
+  const items = (props?.initialItems as Array<{ name?: string; uri?: string }>) ?? [];
+  const out: Array<{ name: string; slug: string }> = [];
+  for (const x of items) {
+    const m = (x.uri ?? "").match(/\/org\/([a-z0-9\-]+)/i);
+    if (x.name && m) out.push({ name: x.name, slug: m[1]!.toLowerCase() });
+  }
+  featuredCache = { at: Date.now(), items: out };
+  return out;
+}
+
+const INDUSTRY_WORDS: Record<string, string[]> = {
+  education: [
+    "education",
+    "university",
+    "college",
+    "school",
+    "academy",
+    "edtech",
+    "k-12",
+    "campus",
+    "institute",
+  ],
+  "higher education": ["university", "college", "campus", "institute"],
+  "real estate": ["real estate", "realty", "property", "housing"],
+  "information technology": ["software", "technology", "saas", "cloud", "cyber"],
+  "computer software": ["software", "saas"],
+  "it services": ["it services", "consulting"],
+};
+
+function industryTokens(label: string): string[] {
+  const key = label.toLowerCase().trim();
+  const extra = INDUSTRY_WORDS[key] ?? [];
+  const bits = key.split(/[^a-z0-9]+/).filter((w) => w.length > 2);
+  return [...new Set([key, ...extra, ...bits])].filter(Boolean);
+}
+
+export async function theOrgPeople(
+  domain: string,
+  companyName: string,
+): Promise<{
+  hits: TheOrgHit[];
+  positions: number;
+  teams: number;
+  slug?: string;
+  related: Array<{ name: string; domain?: string }>;
+}> {
+  const expect = domain.replace(/^www\./, "").toLowerCase() || undefined;
+  const deadline = Date.now() + 50_000;
+  for (const s of slugCandidates(domain, companyName)) {
+    const props = await nextProps(`https://theorg.com/org/${s}`);
+    if (!props?.initialCompany) continue;
+    const company = props.initialCompany as {
+      stats?: { positionCount?: number; teamsCount?: number };
+      social?: { websiteUrl?: string };
+    };
+    const host = websiteHost(company as Record<string, unknown>);
+    if (
+      expect &&
+      host &&
+      host !== expect &&
+      !expect.endsWith(host) &&
+      !host.endsWith(expect)
+    ) {
+      continue;
+    }
+    const { hits, related } = await peopleFromSlug(s, 160, deadline, expect);
+    return {
+      hits,
+      positions: company.stats?.positionCount ?? 0,
+      teams: company.stats?.teamsCount ?? 0,
+      slug: s,
+      related,
+    };
+  }
+  return { hits: [], positions: 0, teams: 0, related: [] };
+}
+
+export async function theOrgPeopleQuick(companyName: string): Promise<TheOrgHit[]> {
+  const r = await theOrgPeople("", companyName);
+  return r.hits;
+}
+
+/** Filter → TheOrg orgs → people. Runs even if LinkedIn is down. */
+export async function theorgDiscover(opts: {
+  keywords?: string;
+  companyName?: string;
+  domain?: string;
+  industryLabel?: string;
+  geoLabel?: string;
+  title?: string;
+}): Promise<TheOrgHit[]> {
+  const hits: TheOrgHit[] = [];
+  const seen = new Set<string>();
+  const add = (rows: TheOrgHit[]) => {
+    for (const h of rows) {
+      if (seen.has(h.slug)) continue;
+      seen.add(h.slug);
+      hits.push(h);
+    }
+  };
+
+  if (opts.companyName || opts.domain) {
+    const r = await theOrgPeople(opts.domain ?? "", opts.companyName ?? "");
+    add(r.hits);
+    const q = (opts.keywords || opts.title || "").trim();
+    if (q) {
+      const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      return hits.filter(
+        (h) =>
+          re.test(h.title ?? "") ||
+          re.test(h.name) ||
+          re.test(h.team ?? ""),
+      );
+    }
+    return hits;
+  }
+
+  const industry = (opts.industryLabel ?? "").replace(/"/g, "").trim();
+  const geo = (opts.geoLabel ?? "").replace(/"/g, "").trim();
+  const kw = (opts.keywords ?? "").replace(/"/g, "").trim();
+  const title = (opts.title ?? "").replace(/"/g, "").trim();
+  const tokens = industryTokens(industry || kw);
+  const queries: string[] = [];
+  for (const t of tokens.slice(0, 6)) {
+    queries.push(`site:theorg.com/org ${t}${geo ? ` "${geo}"` : ""}`);
+  }
+  if (kw && industry && kw.toLowerCase() !== industry.toLowerCase()) {
+    queries.push(`site:theorg.com/org "${kw}" ${industry}${geo ? ` "${geo}"` : ""}`);
+  }
+  if (title) {
+    queries.push(
+      `site:theorg.com/org ${tokens[0] || "org"} "${title}"${geo ? ` ${geo}` : ""}`,
+    );
+  }
+  for (const role of ["CEO", "Director", "VP", "Dean", "Principal"]) {
+    if (tokens[0]) queries.push(`site:theorg.com/org ${tokens[0]} ${role}`);
+  }
+  if (!queries.length) {
+    const fallback = kw || title || industry || geo;
+    if (fallback) queries.push(`site:theorg.com/org "${fallback}"`);
+  }
+
+  const slugs: string[] = [];
+  const seenSlug = new Set<string>();
+  const pushSlug = (s: string) => {
+    const x = s.toLowerCase();
+    if (seenSlug.has(x) || x.length < 2) return;
+    seenSlug.add(x);
+    slugs.push(x);
+  };
+
+  try {
+    const featured = await featuredOrgs();
+    const re = tokens.length
+      ? new RegExp(
+          `\\b(${tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\b`,
+          "i",
+        )
+      : null;
+    for (const c of featured) {
+      if (re && re.test(c.name)) pushSlug(c.slug);
+    }
+  } catch {
+    /* optional */
+  }
+
+  if (queries.length) {
+    try {
+      const { decodoShards } = await import("./decodo-serp");
+      const pages = await decodoShards(queries.slice(0, 12));
+      for (const rows of pages) {
+        for (const row of rows) {
+          const m = (row.link ?? "").match(/theorg\.com\/org\/([a-z0-9\-]+)/i);
+          if (m) pushSlug(m[1]!);
+        }
+      }
+    } catch {
+      /* optional */
+    }
+  }
+
+  const target = slugs.slice(0, 80);
+  const deadline = Date.now() + 45_000;
+  let i = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(16, target.length || 1) }, async () => {
+      while (i < target.length && Date.now() < deadline) {
+        const s = target[i++]!;
+        const r = await peopleFromSlug(s, 36, deadline);
+        add(r.hits);
       }
     }),
   );
 
-  return {
-    hits,
-    positions: company.stats?.positionCount ?? 0,
-    teams: company.stats?.teamsCount ?? 0,
-    slug,
-  };
+  if (title) {
+    const re = new RegExp(title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    return hits.filter((h) => !h.title || re.test(h.title) || re.test(h.name));
+  }
+  return hits;
 }

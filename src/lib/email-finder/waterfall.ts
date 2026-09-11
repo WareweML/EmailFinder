@@ -169,6 +169,7 @@ export async function waterfallFindEmail(input: {
   domain: string;
   linkedinUrl?: string;
   skipSmtp?: boolean;
+  skipDeepResearch?: boolean;
 }): Promise<WaterfallFindResult> {
   const tStart = Date.now();
   const waterfall: WaterfallStage[] = [];
@@ -333,7 +334,17 @@ export async function waterfallFindEmail(input: {
 
   {
     const t = Date.now();
-    try {
+    if (input.skipDeepResearch) {
+      waterfall.push(
+        stage(
+          "deep_research",
+          "Deep research",
+          "skip",
+          "Skipped for LinkedIn URL find",
+          Date.now() - t,
+        ),
+      );
+    } else try {
       const research = await deepResearchDomain(domain);
       let matched = 0;
       for (const c of research.contacts) {
@@ -495,7 +506,7 @@ export async function waterfallFindEmail(input: {
   const tVerify = Date.now();
   let stoppedEarly = false;
   let stopProvider: string | null = null;
-  const toProbe = pool.slice(0, MAX_SMTP_PROBES);
+  const toProbe = pool.slice(0, input.skipDeepResearch ? 3 : MAX_SMTP_PROBES);
 
   for (const item of toProbe) {
     const verification = await verifyEmail(item.email, {

@@ -10,33 +10,219 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiV2IndexRouteImport } from './routes/api/v2/index'
+import { Route as ApiV2DomainSearchRouteImport } from './routes/api/v2/domain-search'
+import { Route as ApiV2EmailFinderRouteImport } from './routes/api/v2/email-finder'
+import { Route as ApiV2EmailVerifierRouteImport } from './routes/api/v2/email-verifier'
+import { Route as ApiV2CompaniesFindRouteImport } from './routes/api/v2/companies/find'
+import { Route as ApiV2CompaniesPhonesRouteImport } from './routes/api/v2/companies/phones'
+import { Route as ApiV2CompaniesSuggestRouteImport } from './routes/api/v2/companies/suggest'
+import { Route as ApiV2DiscoverCompaniesRouteImport } from './routes/api/v2/discover/companies'
+import { Route as ApiV2DiscoverPeopleRouteImport } from './routes/api/v2/discover/people'
+import { Route as ApiV2IcpFindRouteImport } from './routes/api/v2/icp/find'
+import { Route as ApiV2MapsSearchRouteImport } from './routes/api/v2/maps/search'
+import { Route as ApiV2PeopleFindRouteImport } from './routes/api/v2/people/find'
+import { Route as ApiV2SignalsMonitorsRouteImport } from './routes/api/v2/signals/monitors'
+import { Route as ApiV2SignalsRunRouteImport } from './routes/api/v2/signals/run'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiV2IndexRoute = ApiV2IndexRouteImport.update({
+  id: '/api/v2/',
+  path: '/api/v2/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV2DomainSearchRoute = ApiV2DomainSearchRouteImport.update({
+  id: '/api/v2/domain-search',
+  path: '/api/v2/domain-search',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV2EmailFinderRoute = ApiV2EmailFinderRouteImport.update({
+  id: '/api/v2/email-finder',
+  path: '/api/v2/email-finder',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV2EmailVerifierRoute = ApiV2EmailVerifierRouteImport.update({
+  id: '/api/v2/email-verifier',
+  path: '/api/v2/email-verifier',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV2CompaniesFindRoute = ApiV2CompaniesFindRouteImport.update({
+  id: '/api/v2/companies/find',
+  path: '/api/v2/companies/find',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV2CompaniesPhonesRoute = ApiV2CompaniesPhonesRouteImport.update({
+  id: '/api/v2/companies/phones',
+  path: '/api/v2/companies/phones',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV2CompaniesSuggestRoute = ApiV2CompaniesSuggestRouteImport.update({
+  id: '/api/v2/companies/suggest',
+  path: '/api/v2/companies/suggest',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV2DiscoverCompaniesRoute = ApiV2DiscoverCompaniesRouteImport.update({
+  id: '/api/v2/discover/companies',
+  path: '/api/v2/discover/companies',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV2DiscoverPeopleRoute = ApiV2DiscoverPeopleRouteImport.update({
+  id: '/api/v2/discover/people',
+  path: '/api/v2/discover/people',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV2IcpFindRoute = ApiV2IcpFindRouteImport.update({
+  id: '/api/v2/icp/find',
+  path: '/api/v2/icp/find',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV2MapsSearchRoute = ApiV2MapsSearchRouteImport.update({
+  id: '/api/v2/maps/search',
+  path: '/api/v2/maps/search',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV2PeopleFindRoute = ApiV2PeopleFindRouteImport.update({
+  id: '/api/v2/people/find',
+  path: '/api/v2/people/find',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV2SignalsMonitorsRoute = ApiV2SignalsMonitorsRouteImport.update({
+  id: '/api/v2/signals/monitors',
+  path: '/api/v2/signals/monitors',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiV2SignalsRunRoute = ApiV2SignalsRunRouteImport.update({
+  id: '/api/v2/signals/run',
+  path: '/api/v2/signals/run',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/api/v2/domain-search': typeof ApiV2DomainSearchRoute
+  '/api/v2/email-finder': typeof ApiV2EmailFinderRoute
+  '/api/v2/email-verifier': typeof ApiV2EmailVerifierRoute
+  '/api/v2/': typeof ApiV2IndexRoute
+  '/api/v2/companies/find': typeof ApiV2CompaniesFindRoute
+  '/api/v2/companies/phones': typeof ApiV2CompaniesPhonesRoute
+  '/api/v2/companies/suggest': typeof ApiV2CompaniesSuggestRoute
+  '/api/v2/discover/companies': typeof ApiV2DiscoverCompaniesRoute
+  '/api/v2/discover/people': typeof ApiV2DiscoverPeopleRoute
+  '/api/v2/icp/find': typeof ApiV2IcpFindRoute
+  '/api/v2/maps/search': typeof ApiV2MapsSearchRoute
+  '/api/v2/people/find': typeof ApiV2PeopleFindRoute
+  '/api/v2/signals/monitors': typeof ApiV2SignalsMonitorsRoute
+  '/api/v2/signals/run': typeof ApiV2SignalsRunRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/api/v2/domain-search': typeof ApiV2DomainSearchRoute
+  '/api/v2/email-finder': typeof ApiV2EmailFinderRoute
+  '/api/v2/email-verifier': typeof ApiV2EmailVerifierRoute
+  '/api/v2': typeof ApiV2IndexRoute
+  '/api/v2/companies/find': typeof ApiV2CompaniesFindRoute
+  '/api/v2/companies/phones': typeof ApiV2CompaniesPhonesRoute
+  '/api/v2/companies/suggest': typeof ApiV2CompaniesSuggestRoute
+  '/api/v2/discover/companies': typeof ApiV2DiscoverCompaniesRoute
+  '/api/v2/discover/people': typeof ApiV2DiscoverPeopleRoute
+  '/api/v2/icp/find': typeof ApiV2IcpFindRoute
+  '/api/v2/maps/search': typeof ApiV2MapsSearchRoute
+  '/api/v2/people/find': typeof ApiV2PeopleFindRoute
+  '/api/v2/signals/monitors': typeof ApiV2SignalsMonitorsRoute
+  '/api/v2/signals/run': typeof ApiV2SignalsRunRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/api/v2/domain-search': typeof ApiV2DomainSearchRoute
+  '/api/v2/email-finder': typeof ApiV2EmailFinderRoute
+  '/api/v2/email-verifier': typeof ApiV2EmailVerifierRoute
+  '/api/v2/': typeof ApiV2IndexRoute
+  '/api/v2/companies/find': typeof ApiV2CompaniesFindRoute
+  '/api/v2/companies/phones': typeof ApiV2CompaniesPhonesRoute
+  '/api/v2/companies/suggest': typeof ApiV2CompaniesSuggestRoute
+  '/api/v2/discover/companies': typeof ApiV2DiscoverCompaniesRoute
+  '/api/v2/discover/people': typeof ApiV2DiscoverPeopleRoute
+  '/api/v2/icp/find': typeof ApiV2IcpFindRoute
+  '/api/v2/maps/search': typeof ApiV2MapsSearchRoute
+  '/api/v2/people/find': typeof ApiV2PeopleFindRoute
+  '/api/v2/signals/monitors': typeof ApiV2SignalsMonitorsRoute
+  '/api/v2/signals/run': typeof ApiV2SignalsRunRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths:
+    | '/'
+    | '/api/v2/domain-search'
+    | '/api/v2/email-finder'
+    | '/api/v2/email-verifier'
+    | '/api/v2/'
+    | '/api/v2/companies/find'
+    | '/api/v2/companies/phones'
+    | '/api/v2/companies/suggest'
+    | '/api/v2/discover/companies'
+    | '/api/v2/discover/people'
+    | '/api/v2/icp/find'
+    | '/api/v2/maps/search'
+    | '/api/v2/people/find'
+    | '/api/v2/signals/monitors'
+    | '/api/v2/signals/run'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to:
+    | '/'
+    | '/api/v2/domain-search'
+    | '/api/v2/email-finder'
+    | '/api/v2/email-verifier'
+    | '/api/v2'
+    | '/api/v2/companies/find'
+    | '/api/v2/companies/phones'
+    | '/api/v2/companies/suggest'
+    | '/api/v2/discover/companies'
+    | '/api/v2/discover/people'
+    | '/api/v2/icp/find'
+    | '/api/v2/maps/search'
+    | '/api/v2/people/find'
+    | '/api/v2/signals/monitors'
+    | '/api/v2/signals/run'
+  id:
+    | '__root__'
+    | '/'
+    | '/api/v2/domain-search'
+    | '/api/v2/email-finder'
+    | '/api/v2/email-verifier'
+    | '/api/v2/'
+    | '/api/v2/companies/find'
+    | '/api/v2/companies/phones'
+    | '/api/v2/companies/suggest'
+    | '/api/v2/discover/companies'
+    | '/api/v2/discover/people'
+    | '/api/v2/icp/find'
+    | '/api/v2/maps/search'
+    | '/api/v2/people/find'
+    | '/api/v2/signals/monitors'
+    | '/api/v2/signals/run'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ApiV2DomainSearchRoute: typeof ApiV2DomainSearchRoute
+  ApiV2EmailFinderRoute: typeof ApiV2EmailFinderRoute
+  ApiV2EmailVerifierRoute: typeof ApiV2EmailVerifierRoute
+  ApiV2IndexRoute: typeof ApiV2IndexRoute
+  ApiV2CompaniesFindRoute: typeof ApiV2CompaniesFindRoute
+  ApiV2CompaniesPhonesRoute: typeof ApiV2CompaniesPhonesRoute
+  ApiV2CompaniesSuggestRoute: typeof ApiV2CompaniesSuggestRoute
+  ApiV2DiscoverCompaniesRoute: typeof ApiV2DiscoverCompaniesRoute
+  ApiV2DiscoverPeopleRoute: typeof ApiV2DiscoverPeopleRoute
+  ApiV2IcpFindRoute: typeof ApiV2IcpFindRoute
+  ApiV2MapsSearchRoute: typeof ApiV2MapsSearchRoute
+  ApiV2PeopleFindRoute: typeof ApiV2PeopleFindRoute
+  ApiV2SignalsMonitorsRoute: typeof ApiV2SignalsMonitorsRoute
+  ApiV2SignalsRunRoute: typeof ApiV2SignalsRunRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +234,123 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/v2/': {
+      id: '/api/v2/'
+      path: '/api/v2'
+      fullPath: '/api/v2/'
+      preLoaderRoute: typeof ApiV2IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v2/domain-search': {
+      id: '/api/v2/domain-search'
+      path: '/api/v2/domain-search'
+      fullPath: '/api/v2/domain-search'
+      preLoaderRoute: typeof ApiV2DomainSearchRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v2/email-finder': {
+      id: '/api/v2/email-finder'
+      path: '/api/v2/email-finder'
+      fullPath: '/api/v2/email-finder'
+      preLoaderRoute: typeof ApiV2EmailFinderRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v2/email-verifier': {
+      id: '/api/v2/email-verifier'
+      path: '/api/v2/email-verifier'
+      fullPath: '/api/v2/email-verifier'
+      preLoaderRoute: typeof ApiV2EmailVerifierRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v2/companies/find': {
+      id: '/api/v2/companies/find'
+      path: '/api/v2/companies/find'
+      fullPath: '/api/v2/companies/find'
+      preLoaderRoute: typeof ApiV2CompaniesFindRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v2/companies/phones': {
+      id: '/api/v2/companies/phones'
+      path: '/api/v2/companies/phones'
+      fullPath: '/api/v2/companies/phones'
+      preLoaderRoute: typeof ApiV2CompaniesPhonesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v2/companies/suggest': {
+      id: '/api/v2/companies/suggest'
+      path: '/api/v2/companies/suggest'
+      fullPath: '/api/v2/companies/suggest'
+      preLoaderRoute: typeof ApiV2CompaniesSuggestRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v2/discover/companies': {
+      id: '/api/v2/discover/companies'
+      path: '/api/v2/discover/companies'
+      fullPath: '/api/v2/discover/companies'
+      preLoaderRoute: typeof ApiV2DiscoverCompaniesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v2/discover/people': {
+      id: '/api/v2/discover/people'
+      path: '/api/v2/discover/people'
+      fullPath: '/api/v2/discover/people'
+      preLoaderRoute: typeof ApiV2DiscoverPeopleRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v2/icp/find': {
+      id: '/api/v2/icp/find'
+      path: '/api/v2/icp/find'
+      fullPath: '/api/v2/icp/find'
+      preLoaderRoute: typeof ApiV2IcpFindRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v2/maps/search': {
+      id: '/api/v2/maps/search'
+      path: '/api/v2/maps/search'
+      fullPath: '/api/v2/maps/search'
+      preLoaderRoute: typeof ApiV2MapsSearchRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v2/people/find': {
+      id: '/api/v2/people/find'
+      path: '/api/v2/people/find'
+      fullPath: '/api/v2/people/find'
+      preLoaderRoute: typeof ApiV2PeopleFindRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v2/signals/monitors': {
+      id: '/api/v2/signals/monitors'
+      path: '/api/v2/signals/monitors'
+      fullPath: '/api/v2/signals/monitors'
+      preLoaderRoute: typeof ApiV2SignalsMonitorsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/v2/signals/run': {
+      id: '/api/v2/signals/run'
+      path: '/api/v2/signals/run'
+      fullPath: '/api/v2/signals/run'
+      preLoaderRoute: typeof ApiV2SignalsRunRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ApiV2DomainSearchRoute: ApiV2DomainSearchRoute,
+  ApiV2EmailFinderRoute: ApiV2EmailFinderRoute,
+  ApiV2EmailVerifierRoute: ApiV2EmailVerifierRoute,
+  ApiV2IndexRoute: ApiV2IndexRoute,
+  ApiV2CompaniesFindRoute: ApiV2CompaniesFindRoute,
+  ApiV2CompaniesPhonesRoute: ApiV2CompaniesPhonesRoute,
+  ApiV2CompaniesSuggestRoute: ApiV2CompaniesSuggestRoute,
+  ApiV2DiscoverCompaniesRoute: ApiV2DiscoverCompaniesRoute,
+  ApiV2DiscoverPeopleRoute: ApiV2DiscoverPeopleRoute,
+  ApiV2IcpFindRoute: ApiV2IcpFindRoute,
+  ApiV2MapsSearchRoute: ApiV2MapsSearchRoute,
+  ApiV2PeopleFindRoute: ApiV2PeopleFindRoute,
+  ApiV2SignalsMonitorsRoute: ApiV2SignalsMonitorsRoute,
+  ApiV2SignalsRunRoute: ApiV2SignalsRunRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

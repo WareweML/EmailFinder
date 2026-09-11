@@ -1,11 +1,16 @@
-import { useState, useTransition } from "react";
+import { useState } from "react";
 import {
   Building2,
   CheckCircle2,
+  Code2,
   LayoutGrid,
+  Linkedin,
   Loader2,
   Mail,
+  MapPin,
+  Radio,
   Search,
+  Target,
   User,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -17,9 +22,17 @@ import { ResultCard } from "./result-card";
 import { StatusBadge } from "./status-badge";
 import { ClayWorkspace } from "@/components/workspace/clay-workspace";
 import { CompanySuggestInput } from "./company-suggest";
+import { DiscoverPanel } from "./discover-panel";
+import { MapsPanel } from "./maps-panel";
+import { SignalsPanel } from "./signals-panel";
+import { IcpPanel } from "./icp-panel";
+import { ApiDocs } from "./api-docs";
 import {
   domainSearchFn,
   findEmailFn,
+  findLinkedInFn,
+  findPersonFn,
+  resolveCompanyFn,
   verifyEmailFn,
 } from "@/lib/email-finder/server";
 import type {
@@ -27,18 +40,20 @@ import type {
   WaterfallFindResult,
 } from "@/lib/email-finder/waterfall";
 import type { VerificationResult } from "@/lib/email-finder/types";
+import type { PersonFindResponse } from "@/lib/email-finder/person-find";
+import { PersonCard } from "./person-card";
 import { cn } from "@/lib/utils";
 
-type Mode = "workspace" | "finder";
-type TabId = "company" | "name" | "verify";
+type Mode = "workspace" | "finder" | "api";
+type TabId = "company" | "name" | "linkedin" | "verify" | "discover" | "maps" | "signals" | "icp";
 
 function readMode(): Mode {
   if (typeof window === "undefined") return "workspace";
   const q = new URLSearchParams(window.location.search).get("mode");
-  if (q === "finder" || q === "workspace") return q;
+  if (q === "finder" || q === "workspace" || q === "api") return q;
   try {
     const s = sessionStorage.getItem("mailgraph-mode");
-    if (s === "finder" || s === "workspace") return s;
+    if (s === "finder" || s === "workspace" || s === "api") return s;
   } catch {
     /* ignore */
   }
@@ -60,7 +75,7 @@ function writeMode(m: Mode) {
 export function FinderApp() {
   const [mode, setMode] = useState<Mode>("finder");
   const [tab, setTab] = useState<TabId>("company");
-  const [pending, startTransition] = useTransition();
+  const [pending, setPending] = useState(false);
 
   const [domainQuery, setDomainQuery] = useState("");
   const [domainResult, setDomainResult] =
@@ -77,6 +92,7 @@ export function FinderApp() {
   const [findResult, setFindResult] = useState<WaterfallFindResult | null>(
     null,
   );
+  const [personResult, setPersonResult] = useState<PersonFindResponse | null>(null);
 
   const [emailToVerify, setEmailToVerify] = useState("");
   const [verifyResult, setVerifyResult] = useState<VerificationResult | null>(
@@ -108,63 +124,116 @@ export function FinderApp() {
     writeMode(m);
   };
 
+  const isDomain = (q: string) =>
+    /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(
+      q.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0] ?? "",
+    );
+
   const runDomainSearch = (override?: string) => {
-    const q = (override ?? domainQuery).trim();
-    if (!q) {
-      toast.error("Enter a company domain");
+    const raw = (override ?? domainQuery).trim();
+    if (!raw) {
+      toast.error("Enter a company name or domain");
       return;
     }
     setDomainResult(null);
-    startTransition(async () => {
+    setPending(true);
+    void (async () => {
       try {
-        const timeout = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("Search timed out — try again")), 55000),
-        );
-        const res = (await Promise.race([
-          domainSearchFn({
-            data: {
-              domain: q,
-              verifyRoles: false,
-              titleFilter: titleFilter || undefined,
-            },
-          }),
-          timeout,
-        ])) as WaterfallDomainResult;
+        let q = raw.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0] ?? raw;
+        if (!isDomain(q)) {
+          const r = await resolveCompanyFn({ data: { query: raw } });
+          if (!r.domain) {
+            toast.error(`Could not resolve “${raw}” to a domain`);
+            return;
+          }
+          q = r.domain;
+          setDomainQuery(q);
+        }
+        const res = (await domainSearchFn({
+          data: { domain: q, titleFilter: titleFilter.trim() || undefined },
+        })) as WaterfallDomainResult;
         setDomainResult(res);
-        const people =
-          res.peopleCount ??
-          res.emails.filter((e) => !e.isRoleBased).length;
+        const people = res.people?.length ?? 0;
         toast.success(
-          res.emails.length || res.people?.length
+          people
             ? `${people} people · ${res.emails.length} emails`
             : `No contacts for ${res.domain}`,
         );
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "Domain search failed");
+      } finally {
+        setPending(false);
+      }
+    })();
+  };
+
+  const run = (fn: () => Promise<void>) => {
+    setPending(true);
+    void fn().finally(() => setPending(false));
+  };
+
+  const runNameFind = () => {
+    if (!fullName.trim() && !linkedinUrl.trim() && !emailToVerify.trim()) {
+      toast.error("Enter a name, email, or LinkedIn URL");
+      return;
+    }
+    run(async () => {
+      try {
+        setPersonResult(null);
+        setFindResult(null);
+        let domain = personDomain.trim();
+        let company: string | undefined;
+        if (domain && !isDomain(domain)) {
+          company = domain;
+          const r = await resolveCompanyFn({ data: { query: domain } });
+          if (r.domain) {
+            domain = r.domain;
+            setPersonDomain(domain);
+          } else {
+            domain = "";
+          }
+        }
+        const res = await findPersonFn({
+          data: {
+            fullName: fullName.trim() || undefined,
+            domain: domain || undefined,
+            company,
+            linkedinUrl: linkedinUrl.trim() || undefined,
+            email: emailToVerify.trim() || undefined,
+          },
+        });
+        setPersonResult(res as PersonFindResponse);
+        setFindResult(null);
+        if (res.data.work_email) toast.success(`Found ${res.data.work_email}`);
+        else toast.message("Profile enriched");
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Find failed");
       }
     });
   };
 
-  const runNameFind = () => {
-    if ((!fullName.trim() && !linkedinUrl.trim()) || !personDomain.trim()) {
-      toast.error("Enter name (or LinkedIn URL) + domain");
+  const runLinkedInFind = () => {
+    const url = linkedinUrl.trim();
+    if (!/linkedin\.com\/in\//i.test(url)) {
+      toast.error("Paste a LinkedIn profile URL (linkedin.com/in/…)");
       return;
     }
-    startTransition(async () => {
+    setFindResult(null);
+    setPersonResult(null);
+    run(async () => {
       try {
-        const res = await findEmailFn({
+        const res = await findPersonFn({
           data: {
-            fullName: fullName.trim() || " ",
-            domain: personDomain.trim(),
-            linkedinUrl: linkedinUrl.trim() || undefined,
-            skipSmtp: false,
+            linkedinUrl: url,
+            domain: personDomain.trim() || undefined,
+            fullName: fullName.trim() || undefined,
           },
         });
-        setFindResult(res as WaterfallFindResult);
-        if (res.best) toast.success(`Found ${res.best.email}`);
-        else toast.message("No confident match");
+        setPersonResult(res as PersonFindResponse);
+        if (res.data.work_email) toast.success(`Found ${res.data.work_email}`);
+        else toast.message("Profile enriched");
       } catch (e) {
-        toast.error(e instanceof Error ? e.message : "Find failed");
+        toast.error(e instanceof Error ? e.message : "LinkedIn find failed");
       }
     });
   };
@@ -174,7 +243,7 @@ export function FinderApp() {
       toast.error("Enter an email");
       return;
     }
-    startTransition(async () => {
+    run(async () => {
       try {
         const res = await verifyEmailFn({
           data: { email: emailToVerify.trim(), skipSmtp: false },
@@ -186,7 +255,6 @@ export function FinderApp() {
       }
     });
   };
-
   return (
     <div className="min-h-dvh surface-grid text-fg">
       <header className="border-b border-border bg-surface/90 backdrop-blur-sm sticky top-0 z-40">
@@ -226,6 +294,19 @@ export function FinderApp() {
               <Search className="size-3.5" />
               Finder
             </button>
+            <button
+              type="button"
+              onClick={() => switchMode("api")}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs sm:text-sm font-medium",
+                mode === "api"
+                  ? "bg-surface shadow-sm border border-border"
+                  : "text-fg-muted",
+              )}
+            >
+              <Code2 className="size-3.5" />
+              API
+            </button>
           </div>
         </div>
       </header>
@@ -233,6 +314,8 @@ export function FinderApp() {
       <main className="mx-auto max-w-6xl px-4 pb-20 pt-8 sm:px-6 sm:pt-10">
         {mode === "workspace" ? (
           <ClayWorkspace />
+        ) : mode === "api" ? (
+          <ApiDocs />
         ) : (
           <>
             <div className="text-center max-w-2xl mx-auto">
@@ -254,10 +337,31 @@ export function FinderApp() {
                       icon: Building2,
                     },
                     { id: "name" as const, label: "Name", icon: User },
+                    { id: "linkedin" as const, label: "LinkedIn", icon: Linkedin },
                     {
                       id: "verify" as const,
                       label: "Verify",
                       icon: CheckCircle2,
+                    },
+                    {
+                      id: "discover" as const,
+                      label: "Discover",
+                      icon: Search,
+                    },
+                    {
+                      id: "maps" as const,
+                      label: "Maps",
+                      icon: MapPin,
+                    },
+                    {
+                      id: "signals" as const,
+                      label: "Signals",
+                      icon: Radio,
+                    },
+                    {
+                      id: "icp" as const,
+                      label: "ICP",
+                      icon: Target,
                     },
                   ] as const
                 ).map((t) => (
@@ -288,7 +392,7 @@ export function FinderApp() {
                     runDomainSearch();
                   }}
                 >
-                  <div className="flex flex-col sm:flex-row rounded-xl border border-border bg-surface shadow-md overflow-hidden">
+                  <div className="flex flex-col sm:flex-row rounded-xl border border-border bg-surface shadow-md">
                     <div className="relative flex-1">
                       <Search className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 size-4 text-fg-subtle z-10" />
                       <CompanySuggestInput
@@ -302,15 +406,15 @@ export function FinderApp() {
                           });
                           runDomainSearch(s.domain);
                         }}
-                        placeholder="Type company name or domain…"
+                        placeholder="Type Stripe, Vornado, or stripe.com"
                         className="w-full"
-                        inputClassName="h-14 w-full border-0 bg-transparent pl-11 pr-10 text-base focus:outline-none"
+                        inputClassName="h-14 w-full border-0 bg-transparent pl-11 pr-10 text-base focus:outline-none rounded-xl sm:rounded-r-none"
                       />
                     </div>
                     <Button
                       type="submit"
                       disabled={pending}
-                      className="h-14 rounded-none sm:min-w-[180px]"
+                      className="h-14 rounded-none sm:rounded-r-xl sm:min-w-[180px]"
                       variant="secondary"
                     >
                       {pending ? (
@@ -319,6 +423,12 @@ export function FinderApp() {
                       Deep research
                     </Button>
                   </div>
+                  {domainSuggest && (
+                    <p className="text-xs text-fg-muted px-1">
+                      {domainSuggest.label}
+                      <span className="font-mono text-fg"> · {domainSuggest.domain}</span>
+                    </p>
+                  )}
                   <Input
                     value={titleFilter}
                     onChange={(e) => setTitleFilter(e.target.value)}
@@ -388,15 +498,90 @@ export function FinderApp() {
                       placeholder="https://linkedin.com/in/…"
                     />
                   </div>
+                  <div className="space-y-2">
+                    <Label>Email (optional)</Label>
+                    <Input
+                      value={emailToVerify}
+                      onChange={(e) => setEmailToVerify(e.target.value)}
+                      placeholder="name@company.com"
+                    />
+                  </div>
                   <Button type="submit" disabled={pending} className="bg-accent text-accent-fg">
                     {pending ? (
                       <Loader2 className="size-4 animate-spin" />
                     ) : (
                       <Search className="size-4" />
                     )}
-                    Waterfall find
+                    Waterfall find + enrich
                   </Button>
                 </form>
+                {personResult && (
+                  <PersonCard
+                    data={personResult.data}
+                    sources={personResult.meta.sources}
+                    ms={personResult.meta.durationMs}
+                  />
+                )}
+                {findResult && <ResultCard result={findResult} />}
+              </div>
+            )}
+
+            {tab === "linkedin" && (
+              <div className="mt-8 mx-auto max-w-3xl space-y-6">
+                <div className="text-center space-y-2">
+                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-accent">
+                    LinkedIn search
+                  </p>
+                  <h2 className="font-display text-3xl font-semibold tracking-tight">
+                    LinkedIn Email Finder
+                  </h2>
+                  <p className="text-sm text-fg-muted max-w-lg mx-auto">
+                    Paste a LinkedIn profile URL. We read the public name and
+                    company, resolve the domain, then verify a work email live.
+                  </p>
+                </div>
+                <form
+                  className="rounded-xl border border-border bg-surface p-5 space-y-4 shadow-md"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    runLinkedInFind();
+                  }}
+                >
+                  <div className="space-y-2">
+                    <Label>LinkedIn profile URL</Label>
+                    <Input
+                      value={linkedinUrl}
+                      onChange={(e) => setLinkedinUrl(e.target.value)}
+                      placeholder="e.g. linkedin.com/in/janedoe"
+                      className="h-12"
+                    />
+                  </div>
+                  <Button
+                    type="submit"
+                    disabled={pending}
+                    className="w-full h-12 bg-accent text-accent-fg"
+                  >
+                    {pending ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : null}
+                    Find email
+                  </Button>
+                </form>
+                {pending && !personResult && !findResult && (
+                  <div className="rounded-xl border border-border bg-surface px-5 py-8 text-center">
+                    <Loader2 className="size-6 animate-spin mx-auto text-accent" />
+                    <p className="mt-3 text-sm">
+                      Reading public profile · company graph · email waterfall
+                    </p>
+                  </div>
+                )}
+                {personResult && (
+                  <PersonCard
+                    data={personResult.data}
+                    sources={personResult.meta.sources}
+                    ms={personResult.meta.durationMs}
+                  />
+                )}
                 {findResult && <ResultCard result={findResult} />}
               </div>
             )}
@@ -444,6 +629,10 @@ export function FinderApp() {
                 )}
               </div>
             )}
+            {tab === "discover" && <DiscoverPanel />}
+            {tab === "maps" && <MapsPanel />}
+            {tab === "signals" && <SignalsPanel />}
+            {tab === "icp" && <IcpPanel />}
           </>
         )}
       </main>

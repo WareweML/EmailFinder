@@ -92,6 +92,7 @@ export async function findEmail(input: {
   domain: string;
   linkedinUrl?: string;
   skipSmtp?: boolean;
+  skipDeepResearch?: boolean;
 }): Promise<WaterfallFindResult> {
   return waterfallFindEmail(input);
 }
@@ -384,71 +385,20 @@ export async function findByLinkedIn(input: {
   fullName?: string;
   skipSmtp?: boolean;
 }): Promise<WaterfallFindResult> {
-  const li = parseLinkedInUrl(input.linkedinUrl);
-  const name = input.fullName?.trim()
-    ? parseFullName(input.fullName)
-    : li.guessedName;
+  const t0 = Date.now();
+  const { enrichLinkedInProfile } = await import("./linkedin-public");
+  const profile = await enrichLinkedInProfile(input.linkedinUrl);
+  const fullName =
+    input.fullName?.trim() ||
+    profile?.fullName ||
+    "";
+  let domain =
+    (input.domain?.trim() || profile?.domain || "").replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0] ?? "";
 
-  const domainRaw = input.domain?.trim() || li.domainHint || "";
-
-  if (!name?.first) {
+  if (!fullName.split(/\s+/).filter(Boolean).length) {
     return {
-      query: {
-        fullName: input.fullName ?? "",
-        domain: domainRaw,
-        linkedinUrl: input.linkedinUrl,
-      },
-      name: name ?? { first: "", last: "", raw: "" },
-      domainIntel: {
-        domain: domainRaw ? resolveCompanyDomain(domainRaw) : "",
-        normalizedDomain: domainRaw ? resolveCompanyDomain(domainRaw) : "",
-        hasMx: false,
-        mxHosts: [],
-        mxProvider: null,
-        isCatchAllLikely: false,
-        isDisposable: false,
-        patterns: [],
-        knownEmails: [],
-        sampleSize: 0,
-        confidence: 0,
-      },
-      best: null,
-      alternatives: [],
-      pipeline: [
-        step(
-          "linkedin",
-          "LinkedIn parse",
-          "error",
-          li.slug
-            ? `Could not derive name from slug "${li.slug}" — provide full name`
-            : "Invalid LinkedIn profile URL (expected /in/vanity-slug)",
-          0,
-        ),
-      ],
-      durationMs: 0,
-      waterfall: [
-        {
-          id: "linkedin",
-          provider: "LinkedIn parse",
-          status: "error",
-          detail: "Could not parse name",
-          ms: 0,
-          emailsFound: 0,
-        },
-      ],
-      winningProvider: null,
-      indexStats: { totalEmails: 0, domains: 0 },
-    };
-  }
-
-  if (!domainRaw) {
-    return {
-      query: {
-        fullName: `${name.first} ${name.last}`.trim(),
-        domain: "",
-        linkedinUrl: input.linkedinUrl,
-      },
-      name,
+      query: { fullName: "", domain, linkedinUrl: input.linkedinUrl },
+      name: { first: "", last: "", raw: "" },
       domainIntel: {
         domain: "",
         normalizedDomain: "",
@@ -467,34 +417,92 @@ export async function findByLinkedIn(input: {
       pipeline: [
         step(
           "linkedin",
-          "LinkedIn parse",
-          "ok",
-          `Name: ${name.first} ${name.last}`,
-          0,
-        ),
-        step(
-          "domain",
-          "Domain resolution",
+          "LinkedIn profile",
           "error",
-          "Company domain required (LinkedIn does not expose work email domains publicly)",
-          0,
+          "Could not read a public name from that URL",
+          Date.now() - t0,
         ),
       ],
-      durationMs: 0,
+      durationMs: Date.now() - t0,
       waterfall: [
         {
           id: "linkedin",
-          provider: "LinkedIn parse",
+          provider: "LinkedIn public profile",
+          status: "error",
+          detail: "Could not read name from public profile",
+          ms: Date.now() - t0,
+          emailsFound: 0,
+        },
+      ],
+      winningProvider: null,
+      indexStats: { totalEmails: 0, domains: 0 },
+    };
+  }
+
+  if (!domain && profile?.company) {
+    try {
+      const { resolveCompanyDomain } = await import("./company-suggest");
+      domain = (await resolveCompanyDomain(profile.company)) ?? "";
+    } catch {
+      /* */
+    }
+  }
+
+  if (!domain) {
+    const who = [fullName, profile?.title, profile?.company].filter(Boolean).join(" · ");
+    return {
+      query: { fullName, domain: "", linkedinUrl: input.linkedinUrl },
+      name: parseFullName(fullName),
+      domainIntel: {
+        domain: "",
+        normalizedDomain: "",
+        hasMx: false,
+        mxHosts: [],
+        mxProvider: null,
+        isCatchAllLikely: false,
+        isDisposable: false,
+        patterns: [],
+        knownEmails: [],
+        sampleSize: 0,
+        confidence: 0,
+      },
+      best: null,
+      alternatives: [],
+      pipeline: [
+        step(
+          "linkedin",
+          "LinkedIn public profile",
+          "ok",
+          who,
+          Date.now() - t0,
+        ),
+        step(
+          "domain",
+          "Company domain",
+          "error",
+          profile?.company
+            ? `Found ${profile.company} but no website`
+            : "No company on the public profile — add a domain",
+          0,
+        ),
+      ],
+      durationMs: Date.now() - t0,
+      waterfall: [
+        {
+          id: "linkedin",
+          provider: "LinkedIn public profile",
           status: "ok",
-          detail: `Name: ${name.first} ${name.last}`,
-          ms: 0,
+          detail: who,
+          ms: Date.now() - t0,
           emailsFound: 0,
         },
         {
           id: "domain",
           provider: "Domain resolver",
           status: "error",
-          detail: "Company domain required",
+          detail: profile?.company
+            ? `Company ${profile.company} has no resolvable domain`
+            : "Company domain not on public profile",
           ms: 0,
           emailsFound: 0,
         },
@@ -504,13 +512,66 @@ export async function findByLinkedIn(input: {
     };
   }
 
-  return findEmail({
-    fullName:
-      `${name.first}${name.middle ? ` ${name.middle}` : ""} ${name.last}`.trim(),
-    domain: domainRaw,
-    linkedinUrl: input.linkedinUrl,
-    skipSmtp: input.skipSmtp,
-  });
+  const found = await Promise.race([
+    findEmail({
+      fullName,
+      domain,
+      linkedinUrl: profile?.linkedinUrl || input.linkedinUrl,
+      skipSmtp: input.skipSmtp,
+      skipDeepResearch: true,
+    }),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 22_000)),
+  ]);
+  if (!found) {
+    const who = [fullName, profile?.title, profile?.company, domain]
+      .filter(Boolean)
+      .join(" · ");
+    return {
+      query: { fullName, domain, linkedinUrl: input.linkedinUrl },
+      name: parseFullName(fullName),
+      domainIntel: {
+        domain,
+        normalizedDomain: domain,
+        hasMx: false,
+        mxHosts: [],
+        mxProvider: null,
+        isCatchAllLikely: false,
+        isDisposable: false,
+        patterns: [],
+        knownEmails: [],
+        sampleSize: 0,
+        confidence: 0,
+      },
+      best: null,
+      alternatives: [],
+      pipeline: [
+        step("linkedin", "LinkedIn public profile", "ok", who, Date.now() - t0),
+        step("verify", "Email verify", "error", "Timed out verifying mailbox", 0),
+      ],
+      durationMs: Date.now() - t0,
+      waterfall: [
+        {
+          id: "linkedin",
+          provider: "LinkedIn public profile",
+          status: "ok",
+          detail: who,
+          ms: Date.now() - t0,
+          emailsFound: 0,
+        },
+        {
+          id: "verify",
+          provider: "SMTP",
+          status: "error",
+          detail: "Verification timed out — try Name finder with the domain",
+          ms: 0,
+          emailsFound: 0,
+        },
+      ],
+      winningProvider: null,
+      indexStats: { totalEmails: 0, domains: 0 },
+    };
+  }
+  return found;
 }
 
 export async function searchDomain(

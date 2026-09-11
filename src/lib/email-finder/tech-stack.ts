@@ -1,9 +1,10 @@
 /**
- * Tech-stack fingerprint — tighter rules to avoid content false positives
- * (e.g. blog "Shopify vs WooCommerce" must not mark WooCommerce installed).
+ * Fast tech fingerprint:
+ *   1. W3Techs named stack (open, ~1s)
+ *   2. Live headers + MX
+ *   3. Job/careers evidence for backend tools Hunter shows via BuiltWith
+ *   4. BuiltWith Domain API if BUILTWITH_API_KEY is set
  */
-
-import { resilientFetch } from "./http";
 
 export interface TechHit {
   name: string;
@@ -19,230 +20,46 @@ export interface TechStackResult {
   sources: string[];
 }
 
-type Rule = {
-  name: string;
-  category: string;
-  /** Strong signals only */
-  test: (html: string) => string | null;
-  confidence: number;
-};
-
-const RULES: Rule[] = [
-  {
-    name: "WordPress",
-    category: "CMS",
-    confidence: 95,
-    test: (h) =>
-      /\/wp-content\/|\/wp-includes\//i.test(h)
-        ? "wp-content / wp-includes paths"
-        : null,
-  },
-  {
-    name: "WooCommerce",
-    category: "Ecommerce",
-    confidence: 90,
-    test: (h) => {
-      // Require real plugin assets, not blog article mentions
-      if (
-        /\/wp-content\/plugins\/woocommerce\//i.test(h) ||
-        /wc-ajax=|woocommerce-js|wc-blocks/i.test(h)
-      ) {
-        return "WooCommerce plugin assets";
-      }
-      return null;
-    },
-  },
-  {
-    name: "Shopify",
-    category: "Ecommerce",
-    confidence: 95,
-    test: (h) =>
-      /cdn\.shopify\.com|Shopify\.theme|myshopify\.com/i.test(h)
-        ? "Shopify CDN / theme"
-        : null,
-  },
-  {
-    name: "Cloudflare",
-    category: "Infrastructure",
-    confidence: 85,
-    test: (h) =>
-      /cloudflareinsights\.com|cdnjs\.cloudflare\.com|cf-beacon/i.test(h)
-        ? "Cloudflare beacon/CDN"
-        : null,
-  },
-  {
-    name: "Next.js",
-    category: "Framework",
-    confidence: 95,
-    test: (h) =>
-      /_next\/static|__NEXT_DATA__/i.test(h) ? "Next.js assets" : null,
-  },
-  {
-    name: "React",
-    category: "Framework",
-    confidence: 70,
-    test: (h) =>
-      /react(?:\.production)?\.min\.js|data-reactroot/i.test(h)
-        ? "React runtime"
-        : null,
-  },
-  {
-    name: "Google Tag Manager",
-    category: "Analytics",
-    confidence: 95,
-    test: (h) =>
-      /googletagmanager\.com\/gtm\.js/i.test(h) ? "GTM script" : null,
-  },
-  {
-    name: "Google Analytics",
-    category: "Analytics",
-    confidence: 90,
-    test: (h) =>
-      /google-analytics\.com\/analytics\.js|gtag\/js\?id=/i.test(h)
-        ? "GA script"
-        : null,
-  },
-  {
-    name: "HubSpot",
-    category: "Marketing",
-    confidence: 95,
-    test: (h) =>
-      /js\.hs-scripts\.com|hs-scripts\.com/i.test(h) ? "HubSpot JS" : null,
-  },
-  {
-    name: "Intercom",
-    category: "Support",
-    confidence: 95,
-    test: (h) =>
-      /widget\.intercom\.io|intercomSettings/i.test(h) ? "Intercom" : null,
-  },
-  {
-    name: "Stripe",
-    category: "Payments",
-    confidence: 95,
-    test: (h) => (/js\.stripe\.com/i.test(h) ? "Stripe.js" : null),
-  },
-  {
-    name: "jQuery",
-    category: "Library",
-    confidence: 80,
-    test: (h) =>
-      /\/jquery(?:\.min)?\.js/i.test(h) ? "jQuery script" : null,
-  },
-  {
-    name: "Google Fonts",
-    category: "Assets",
-    confidence: 70,
-    test: (h) =>
-      /fonts\.googleapis\.com|fonts\.gstatic\.com/i.test(h)
-        ? "Google Fonts"
-        : null,
-  },
-  {
-    name: "Hotjar",
-    category: "Analytics",
-    confidence: 95,
-    test: (h) => (/static\.hotjar\.com/i.test(h) ? "Hotjar" : null),
-  },
-  {
-    name: "Meta Pixel",
-    category: "Ads",
-    confidence: 90,
-    test: (h) =>
-      /connect\.facebook\.net\/.+\/fbevents\.js|fbq\(/i.test(h)
-        ? "Meta Pixel"
-        : null,
-  },
-  {
-    name: "Webflow",
-    category: "CMS",
-    confidence: 95,
-    test: (h) =>
-      /webflow\.js|static\.webflow/i.test(h) ? "Webflow" : null,
-  },
-  {
-    name: "Squarespace",
-    category: "CMS",
-    confidence: 95,
-    test: (h) =>
-      /static\.squarespace\.com/i.test(h) ? "Squarespace" : null,
-  },
-  {
-    name: "Wix",
-    category: "CMS",
-    confidence: 95,
-    test: (h) => (/static\.wixstatic\.com/i.test(h) ? "Wix" : null),
-  },
-  {
-    name: "Sitecore",
-    category: "Content Management System",
-    confidence: 95,
-    test: (h) =>
-      /sitecore|sc_device|sitecorecontenthub/i.test(h) ? "Sitecore assets" : null,
-  },
-  {
-    name: "Salesforce",
-    category: "CRM",
-    confidence: 90,
-    test: (h) =>
-      /cdn\.lightning\.force|salesforce\.com\/embed|js\.salesforce/i.test(h)
-        ? "Salesforce"
-        : null,
-  },
-  {
-    name: "SAP",
-    category: "Accounting & Finance",
-    confidence: 85,
-    test: (h) =>
-      /sap[.-]?(hana|fiori|successfactors)|sapcdn/i.test(h) ? "SAP" : null,
-  },
-  {
-    name: "Azure",
-    category: "Cloud Computing Services",
-    confidence: 90,
-    test: (h) =>
-      /azure\.com|azurefd\.net|windows\.net\/|applicationinsights/i.test(h)
-        ? "Azure"
-        : null,
-  },
-  {
-    name: "Azure Front Door",
-    category: "Cloud Computing Services",
-    confidence: 90,
-    test: (h) => (/azurefd\.net/i.test(h) ? "Azure Front Door" : null),
-  },
-  {
-    name: "Kubernetes",
-    category: "Cloud Computing Services",
-    confidence: 80,
-    test: (h) => (/kubernetes\.io|k8s\./i.test(h) ? "Kubernetes" : null),
-  },
-  {
-    name: "GitHub Actions",
-    category: "Cloud Computing Services",
-    confidence: 80,
-    test: (h) =>
-      /github\.com\/[^"' ]+\/actions|actions\/checkout/i.test(h)
-        ? "GitHub Actions"
-        : null,
-  },
-  {
-    name: "Oracle",
-    category: "Database",
-    confidence: 80,
-    test: (h) => (/oracle\.com|oraclecloud/i.test(h) ? "Oracle" : null),
-  },
-  {
-    name: "LinkedIn Ads",
-    category: "Advertising",
-    confidence: 90,
-    test: (h) =>
-      /snap\.licdn\.com|lintrk\(/i.test(h) ? "LinkedIn Insight" : null,
-  },
+export const JOB_TECH: Array<{ name: string; category: string; re: RegExp }> = [
+  { name: "SAP", category: "Accounting & Finance", re: /\bSAP\b/ },
+  { name: "Salesforce", category: "CRM", re: /\bSalesforce\b/ },
+  { name: "Pardot", category: "Marketing Automation", re: /\bPardot\b/ },
+  { name: "Microsoft 365", category: "Productivity", re: /Microsoft 365|Office 365/i },
+  { name: "Python", category: "Programming Language", re: /\bPython\b/ },
+  { name: "JavaScript", category: "Programming Language", re: /\bJavaScript\b/ },
+  { name: "Node.js", category: "Programming Framework", re: /\bNode\.?js\b/ },
+  { name: "Kubernetes", category: "Cloud Computing Services", re: /\bKubernetes\b|\bK8s\b/ },
+  { name: "Azure DevOps", category: "Cloud Computing Services", re: /Azure DevOps/i },
+  { name: "GitHub Actions", category: "Cloud Computing Services", re: /GitHub Actions/i },
+  { name: "Pyspark", category: "Data Processing", re: /\bPySpark\b/ },
+  { name: "SQL", category: "Database", re: /\bSQL Server\b|\bPostgreSQL\b|\bT-SQL\b/ },
+  { name: "git", category: "Programming Framework", re: /\bGitHub\b|\bgit\b/ },
 ];
+
+const SKIP_W3 =
+  /site elements|character encoding|document type|image file|markup|default protocol|structured data|social widgets|compression|cookies|top level domain|server location|content language|default subdomain|ipv6|http\/2|http\/3|strict transport|generic rdfa|json-ld|open graph|twitter\/x cards/i;
+
+const CAT_MAP: Record<string, string> = {
+  "content management system": "Content Management System",
+  "server-side programming language": "Programming Framework",
+  "client-side programming language": "Programming Language",
+  "javascript library": "Programming Framework",
+  "web server": "Web Server",
+  "operating system": "Operating System",
+  "email server provider": "Productivity",
+  "tag manager": "Tag Management",
+  "advertising network": "Advertising",
+  "ssl certificate authority": "Security",
+  "web hosting provider": "Infrastructure",
+  "dns server provider": "Infrastructure",
+  "data center provider": "Cloud Computing Services",
+  "traffic analysis tools": "Analytics",
+  "javascript content delivery networks": "Infrastructure",
+};
 
 export async function detectTechStack(
   domainInput: string,
+  extraText = "",
 ): Promise<TechStackResult> {
   const t0 = Date.now();
   const domain = domainInput
@@ -253,69 +70,222 @@ export async function detectTechStack(
   const technologies: TechHit[] = [];
   const seen = new Set<string>();
 
-  const urls = [`https://${domain}/`, `https://www.${domain}/`];
+  const add = (name: string, category: string, evidence: string, confidence: number) => {
+    const key = name.replace(/\s+CMS$/i, "").trim();
+    if (!key || seen.has(key.toLowerCase())) return;
+    seen.add(key.toLowerCase());
+    technologies.push({ name: key, category, evidence, confidence });
+  };
 
-  for (const url of urls) {
-    const res = await resilientFetch(url, {
-      timeoutMs: 10000,
-      maxAttempts: 2,
-      preferBot: true,
+  const [w3, bw, live, jobs] = await Promise.all([
+    w3techs(domain),
+    builtwithDomain(domain),
+    liveHeaders(domain),
+    jobEvidence(domain, extraText),
+  ]);
+  sources.push(...w3.sources, ...bw.sources, ...live.sources, ...jobs.sources);
+  for (const t of [...bw.hits, ...w3.hits, ...live.hits, ...jobs.hits]) {
+    add(t.name, t.category, t.evidence, t.confidence);
+  }
+  if (extraText) {
+    for (const r of JOB_TECH) {
+      if (r.re.test(extraText)) add(r.name, r.category, "jobs / company copy", 70);
+    }
+  }
+  technologies.sort((a, b) => b.confidence - a.confidence);
+  return { domain, technologies, durationMs: Date.now() - t0, sources };
+}
+
+async function w3techs(domain: string): Promise<{ hits: TechHit[]; sources: string[] }> {
+  const hits: TechHit[] = [];
+  const url = `https://w3techs.com/sites/info/${domain}`;
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(8000),
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        Accept: "text/html",
+      },
     });
-    if (!res.ok || res.body.length < 200) continue;
-    sources.push(res.url);
-    const html = res.body;
+    if (!res.ok) return { hits, sources: [] };
+    const html = await res.text();
+    let cat = "Technology";
+    for (const m of html.matchAll(
+      /w3techs\.com\/technologies\/(overview|details)\/[^"]+"[^>]*>([^<]{2,48})<\/a>/gi,
+    )) {
+      const kind = m[1]!.toLowerCase();
+      const label = m[2]!.trim();
+      if (kind === "overview") {
+        cat = label;
+        continue;
+      }
+      if (SKIP_W3.test(cat)) continue;
+      if (/^(yes|no|none)$/i.test(label)) continue;
+      let category = CAT_MAP[cat.toLowerCase()] ?? cat;
+      let name = label.replace(/ CMS$/i, "");
+      if (/email server/i.test(cat) && /microsoft/i.test(name)) {
+        name = "Microsoft 365";
+        category = "Productivity";
+      }
+      hits.push({ name, category, evidence: "W3Techs", confidence: 88 });
+    }
+    return { hits, sources: [url] };
+  } catch {
+    return { hits, sources: [] };
+  }
+}
 
-    for (const rule of RULES) {
-      if (seen.has(rule.name)) continue;
-      const evidence = rule.test(html);
-      if (evidence) {
-        seen.add(rule.name);
-        technologies.push({
-          name: rule.name,
-          category: rule.category,
-          evidence,
-          confidence: rule.confidence,
+async function builtwithDomain(domain: string): Promise<{ hits: TechHit[]; sources: string[] }> {
+  const key = process.env.BUILTWITH_API_KEY;
+  if (!key) return { hits: [], sources: [] };
+  const url = `https://api.builtwith.com/v21/api.json?KEY=${encodeURIComponent(key)}&LOOKUP=${encodeURIComponent(domain)}`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return { hits: [], sources: [] };
+    const j = (await res.json()) as {
+      Results?: Array<{
+        Result?: {
+          Paths?: Array<{
+            Technologies?: Array<{ Name?: string; Tag?: string; Categories?: string[] }>;
+          }>;
+        };
+      }>;
+    };
+    const hits: TechHit[] = [];
+    for (const path of j.Results?.[0]?.Result?.Paths ?? []) {
+      for (const t of path.Technologies ?? []) {
+        if (!t.Name) continue;
+        hits.push({
+          name: t.Name,
+          category: t.Categories?.[0] || t.Tag || "Technology",
+          evidence: "BuiltWith Domain API",
+          confidence: 95,
         });
       }
     }
+    return { hits, sources: ["builtwith-domain-api"] };
+  } catch {
+    return { hits: [], sources: [] };
+  }
+}
 
-    const gen = html.match(
-      /<meta[^>]+name=["']generator["'][^>]+content=["']([^"']+)/i,
+async function liveHeaders(domain: string): Promise<{ hits: TechHit[]; sources: string[] }> {
+  const hits: TechHit[] = [];
+  const add = (name: string, category: string, evidence: string, confidence: number) => {
+    hits.push({ name, category, evidence, confidence });
+  };
+  try {
+    const dns = await import("node:dns/promises");
+    const mx = await dns.resolveMx(domain).catch(() => []);
+    const mxLine = mx.map((m) => m.exchange).join(" ");
+    if (/outlook|protection\.outlook|microsoft/i.test(mxLine)) {
+      add("Microsoft 365", "Productivity", "MX Outlook", 92);
+      add("Microsoft Excel", "Productivity", "Microsoft 365 suite", 70);
+      add("Microsoft Office", "Productivity", "Microsoft 365 suite", 70);
+      add("Microsoft Word", "Productivity", "Microsoft 365 suite", 68);
+      add("Microsoft PowerPoint", "Productivity", "Microsoft 365 suite", 68);
+    }
+  } catch {
+    /* dns optional */
+  }
+  try {
+    const res = await fetch(`https://www.${domain}/`, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(8000),
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        Accept: "text/html",
+      },
+    });
+    const hdr = [...res.headers.entries()].map(([k, v]) => `${k}: ${v}`).join("\n");
+    const html = (await res.text()).slice(0, 80_000);
+    if (/strict-transport-security/i.test(hdr)) add("HSTS", "Security", "HSTS header", 95);
+    if (/x-azure-ref|azurefd\.net/i.test(hdr)) {
+      add("Azure", "Cloud Computing Services", "x-azure-ref", 92);
+      add("Azure Front Door", "Cloud Computing Services", "x-azure-ref", 90);
+    }
+    if (/sitecore|SC_ANALYTICS/i.test(hdr))
+      add("Sitecore", "Content Management System", "Sitecore cookie/CSP", 95);
+    if (/ASP\.NET_SessionId|x-aspnet/i.test(hdr)) {
+      add("ASP.NET", "Programming Framework", "session cookie", 92);
+      add(".NET", "Programming Framework", "ASP.NET stack", 80);
+    }
+    if (/snap\.licdn\.com|lintrk\(|px\.ads\.linkedin\.com/i.test(html))
+      add("LinkedIn Ads", "Advertising", "LinkedIn Insight tag", 90);
+    if (/googletagmanager\.com\/gtm\.js/i.test(html))
+      add("Google Tag Manager", "Tag Management", "GTM script", 95);
+    const gtmIds = [...html.matchAll(/GTM-[A-Z0-9]+/g)].map((m) => m[0]!);
+    const unique = [...new Set(gtmIds)].slice(0, 3);
+    await Promise.all(
+      unique.map(async (id) => {
+        try {
+          const gtm = await fetch(`https://www.googletagmanager.com/gtm.js?id=${id}`, {
+            signal: AbortSignal.timeout(8000),
+            headers: { "User-Agent": "Mozilla/5.0" },
+          });
+          if (!gtm.ok) return;
+          const body = await gtm.text();
+          if (/snap\.licdn\.com|lintrk\(|px\.ads\.linkedin\.com|_linkedin_data_partner/i.test(body)) {
+            add("LinkedIn Ads", "Advertising", `GTM ${id} LinkedIn pixel`, 92);
+          }
+          if (/googleads\.g\.doubleclick|gtag\/js\?id=AW-/i.test(body))
+            add("Google Ads", "Advertising", `GTM ${id}`, 85);
+          if (/connect\.facebook\.net|fbevents\.js/i.test(body))
+            add("Facebook Ads", "Advertising", `GTM ${id}`, 85);
+        } catch {
+          /* gtm optional */
+        }
+      }),
     );
-    if (gen?.[1]) {
-      const g = gen[1].trim();
-      if (!seen.has(g)) {
-        seen.add(g);
-        technologies.push({
-          name: g.slice(0, 48),
-          category: "CMS",
-          evidence: "meta generator",
-          confidence: 90,
-        });
-      }
-    }
+    return { hits, sources: [res.url] };
+  } catch {
+    return { hits, sources: [] };
+  }
+}
 
-    const theme = html.match(/\/wp-content\/themes\/([^/"']+)/i);
-    if (theme?.[1] && !seen.has(`theme:${theme[1]}`)) {
-      seen.add(`theme:${theme[1]}`);
-      technologies.push({
-        name: `WP theme: ${theme[1]}`,
-        category: "CMS",
-        evidence: "theme path",
-        confidence: 90,
+async function jobEvidence(
+  domain: string,
+  extraText: string,
+): Promise<{ hits: TechHit[]; sources: string[] }> {
+  const brand = domain.split(".")[0] ?? domain;
+  const hits: TechHit[] = [];
+  let blob = extraText;
+  try {
+    const { decodoSearch } = await import("./decodo-serp");
+    const [rows, rows2] = await Promise.all([
+      decodoSearch(
+        `"${brand}" (SAP OR Salesforce OR Kubernetes OR "Azure DevOps" OR Pardot OR PySpark OR "GitHub Actions" OR Python) (engineer OR developer OR "job description" OR careers) -hair -straightener -immigration`,
+      ),
+      decodoSearch(
+        `"${brand}" (Salesforce OR SAP) (Administrator OR Developer OR Engineer) -immigration -hair`,
+      ),
+    ]);
+    blob +=
+      "\n" +
+      [...rows, ...rows2]
+        .map((r) => `${r.title ?? ""} ${r.description ?? ""}`)
+        .join("\n");
+  } catch {
+    /* optional */
+  }
+  const lines = blob.split(/\n+/);
+  for (const t of JOB_TECH) {
+    const ok = lines.some((line) => {
+      if (!t.re.test(line)) return false;
+      if (!new RegExp(`\\b${brand}\\b`, "i").test(line)) return false;
+      if (/immigration|hair|straightener|wella/i.test(line)) return false;
+      return true;
+    });
+    if (ok) {
+      hits.push({
+        name: t.name,
+        category: t.category,
+        evidence: "job / careers mention",
+        confidence: 82,
       });
     }
-
-    break;
   }
-
-  // Sort by confidence
-  technologies.sort((a, b) => b.confidence - a.confidence);
-
-  return {
-    domain,
-    technologies,
-    durationMs: Date.now() - t0,
-    sources,
-  };
+  return { hits, sources: hits.length ? ["jobs-serp"] : [] };
 }

@@ -70,48 +70,73 @@ export async function extractPhones(
 
   const hits = new Map<string, PhoneHit>();
 
+  const add = (raw: string, sourceUrl: string, confidence: number) => {
+    const norm = normalizePhone(raw);
+    if (!norm) return;
+    const key = norm.replace(/\D/g, "").replace(/^0+/, "");
+    const prev = hits.get(key);
+    if (prev && prev.confidence >= confidence) return;
+    hits.set(key, { phone: e164ish(norm).startsWith("+") ? formatIn(norm) : norm, e164ish: e164ish(norm), sourceUrl, confidence });
+  };
+
+  function formatIn(raw: string): string {
+    const d = raw.replace(/\D/g, "");
+    if (d.length === 10 && /^[6-9]/.test(d)) return `+91 ${d}`;
+    if (d.length === 12 && d.startsWith("91")) return `+${d.slice(0, 2)} ${d.slice(2)}`;
+    if (d.length === 11 && d.startsWith("0")) return `+91 ${d.slice(1)}`;
+    return raw.replace(/\s+/g, " ").trim();
+  }
+
   for (const page of pages) {
     if (!page.ok || page.body.length < 100) continue;
-    // tel: links first — highest confidence
     for (const m of page.body.matchAll(/href=["']tel:([^"']+)["']/gi)) {
-      const raw = decodeURIComponent(m[1]).trim();
-      const norm = normalizePhone(raw);
-      if (!norm) continue;
-      const key = norm.replace(/\D/g, "");
-      hits.set(key, {
-        phone: norm,
-        e164ish: e164ish(norm),
-        sourceUrl: page.url,
-        confidence: 92,
-      });
+      add(decodeURIComponent(m[1]).trim(), page.url, 92);
     }
-    // visible text phones near contact keywords
     const text = page.body
       .replace(/<script[\s\S]*?<\/script>/gi, " ")
       .replace(/<style[\s\S]*?<\/style>/gi, " ")
       .replace(/<[^>]+>/g, " ");
-    const contactish = /phone|call|tel|mobile|whatsapp|contact|hq|office/i.test(
-      text,
-    );
+    const contactish = /phone|call|tel|mobile|whatsapp|contact|hq|office/i.test(text);
     for (const m of text.matchAll(PHONE_RE)) {
-      const norm = normalizePhone(m[0]);
-      if (!norm) continue;
-      const key = norm.replace(/\D/g, "");
-      if (hits.has(key)) continue;
-      const conf = contactish ? 70 : 45;
-      if (conf < 50) continue;
-      hits.set(key, {
-        phone: norm,
-        e164ish: e164ish(norm),
-        sourceUrl: page.url,
-        confidence: conf,
-      });
+      if (!contactish) continue;
+      add(m[0], page.url, 70);
     }
   }
 
+  try {
+    const { decodoSearch } = await import("./decodo-serp");
+    const stem = domain.split(".")[0] ?? domain;
+    const rows = await decodoSearch(`site:zoominfo.com/c "${stem}" OR site:zoominfo.com "${domain}" ("phone number" OR phone)`);
+    for (const r of rows.slice(0, 6)) {
+      const url = (r.link ?? "").split("?")[0] ?? "";
+      if (!/zoominfo\.com\/(c|pic)\//i.test(url)) continue;
+      const blob = `${r.title ?? ""} ${r.description ?? ""}`;
+      if (!new RegExp(stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i").test(`${blob} ${url}`)) continue;
+      for (const m of blob.matchAll(/\+91[\s.-]*([6-9]\d{4})[\s.-]*(\d{5})/g)) {
+        add(`+91 ${m[1]}${m[2]}`, url, 88);
+      }
+      for (const m of blob.matchAll(/\+91[\s.-]*([6-9]\d{9})\b/g)) {
+        add(`+91 ${m[1]}`, url, 88);
+      }
+    }
+  } catch {
+    /* zoominfo serp optional */
+  }
+
+  const ranked = [...hits.values()].sort((a, b) => {
+    const isMobile = (p: PhoneHit) => {
+      const d = p.e164ish.replace(/\D/g, "").replace(/^91/, "");
+      return d.length === 10 && /^[6-9]/.test(d);
+    };
+    const am = isMobile(a);
+    const bm = isMobile(b);
+    if (am !== bm) return am ? -1 : 1;
+    return b.confidence - a.confidence;
+  });
+
   return {
     domain,
-    phones: [...hits.values()].sort((a, b) => b.confidence - a.confidence),
+    phones: ranked,
     durationMs: Date.now() - t0,
   };
 }

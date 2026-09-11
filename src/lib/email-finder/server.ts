@@ -31,7 +31,55 @@ export const findLinkedInFn = createServerFn({ method: "POST" })
   )
   .handler(async ({ data }) => {
     const { findByLinkedIn } = await import("./pipeline");
-    return findByLinkedIn(data);
+    try {
+      return await findByLinkedIn(data);
+    } catch (e) {
+      return {
+        query: {
+          fullName: data.fullName ?? "",
+          domain: data.domain ?? "",
+          linkedinUrl: data.linkedinUrl,
+        },
+        name: { first: "", last: "", raw: data.fullName ?? "" },
+        domainIntel: {
+          domain: data.domain ?? "",
+          normalizedDomain: data.domain ?? "",
+          hasMx: false,
+          mxHosts: [],
+          mxProvider: null,
+          isCatchAllLikely: false,
+          isDisposable: false,
+          patterns: [],
+          knownEmails: [],
+          sampleSize: 0,
+          confidence: 0,
+        },
+        best: null,
+        alternatives: [],
+        pipeline: [
+          {
+            id: "linkedin",
+            label: "LinkedIn find",
+            status: "error" as const,
+            detail: e instanceof Error ? e.message : "Find failed",
+            ms: 0,
+          },
+        ],
+        durationMs: 0,
+        waterfall: [
+          {
+            id: "linkedin",
+            provider: "LinkedIn",
+            status: "error" as const,
+            detail: e instanceof Error ? e.message : "Find failed",
+            ms: 0,
+            emailsFound: 0,
+          },
+        ],
+        winningProvider: null,
+        indexStats: { totalEmails: 0, domains: 0 },
+      };
+    }
   });
 
 export const domainSearchFn = createServerFn({ method: "POST" })
@@ -176,6 +224,40 @@ export const techStackFn = createServerFn({ method: "POST" })
     return detectTechStack(data.domain);
   });
 
+export const lookupPersonFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: { domain: string; companyName?: string; query: string }) => data,
+  )
+  .handler(async ({ data }) => {
+    const { lookupPersonAtCompany } = await import("./linkedin-company");
+    return lookupPersonAtCompany(data);
+  });
+
+export const findCompanyFn = createServerFn({ method: "POST" })
+  .validator((data: { domain: string }) => data)
+  .handler(async ({ data }) => {
+    const { findCompany } = await import("./company-find");
+    return findCompany(data.domain);
+  });
+
+export const findPersonFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      email?: string;
+      linkedinUrl?: string;
+      fullName?: string;
+      firstName?: string;
+      lastName?: string;
+      domain?: string;
+      company?: string;
+      phone?: string;
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const { findPerson } = await import("./person-find");
+    return findPerson(data);
+  });
+
 export const runCellActionFn = createServerFn({ method: "POST" })
   .validator(
     (data: {
@@ -250,5 +332,221 @@ export const suggestCompanyFn = createServerFn({ method: "POST" })
   .validator((data: { query: string }) => data)
   .handler(async ({ data }) => {
     const { suggestCompanies } = await import("./company-suggest");
-    return suggestCompanies(data.query);
+    return Promise.race([
+      suggestCompanies(data.query),
+      new Promise<Awaited<ReturnType<typeof suggestCompanies>>>((resolve) =>
+        setTimeout(() => resolve([]), 2800),
+      ),
+    ]);
   });
+
+export const resolveCompanyFn = createServerFn({ method: "POST" })
+  .validator((data: { query: string }) => data)
+  .handler(async ({ data }) => {
+    const q = data.query.trim();
+    if (!q) return { domain: "" };
+    if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(q.replace(/^https?:\/\//, "").split("/")[0] ?? "")) {
+      const d = q.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0]!.toLowerCase();
+      return { domain: d };
+    }
+    const { resolveCompanyDomain } = await import("./company-suggest");
+    return { domain: (await resolveCompanyDomain(q)) ?? "" };
+  });
+
+export const mapsSearchFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      mode: "text" | "types";
+      query?: string;
+      location: string;
+      includeTypes?: string[];
+      excludeTypes?: string[];
+      rank?: "popularity" | "distance";
+      limit?: number;
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const { searchMapsLeads } = await import("./maps-leads");
+    return searchMapsLeads(data);
+  });
+
+export const discoverCompaniesFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      keywords?: string;
+      companyName?: string;
+      companyId?: string;
+      domain?: string;
+      industryId?: string;
+      sizeId?: string;
+      hqGeoId?: string;
+      companyType?: string;
+      revenueBand?: string;
+      growthBand?: string;
+      hiringOnly?: boolean;
+      start?: number;
+      count?: number;
+      pages?: number;
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const { discoverCompanies } = await import("./voyager-search");
+    return discoverCompanies(data);
+  });
+
+export const discoverPeopleFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      keywords?: string;
+      firstName?: string;
+      lastName?: string;
+      title?: string;
+      pastTitle?: string;
+      skills?: string;
+      school?: string;
+      language?: string;
+      yearsExp?: string;
+      tenure?: string;
+      companyId?: string;
+      companyName?: string;
+      pastCompanyId?: string;
+      pastCompanyName?: string;
+      companyKeywords?: string;
+      domain?: string;
+      geoId?: string;
+      hqGeoId?: string;
+      industryId?: string;
+      sizeId?: string;
+      companyType?: string;
+      revenueBand?: string;
+      growthBand?: string;
+      hiringOnly?: boolean;
+      start?: number;
+      count?: number;
+      pages?: number;
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const { discoverPeople } = await import("./voyager-search");
+    return discoverPeople(data);
+  });
+
+export const discoverCountFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      kind: "companies" | "people";
+      keywords?: string;
+      companyName?: string;
+      companyId?: string;
+      domain?: string;
+      industryId?: string;
+      sizeId?: string;
+      hqGeoId?: string;
+      companyType?: string;
+      firstName?: string;
+      lastName?: string;
+      title?: string;
+      pastTitle?: string;
+      skills?: string;
+      school?: string;
+      language?: string;
+      yearsExp?: string;
+      tenure?: string;
+      pastCompanyId?: string;
+      pastCompanyName?: string;
+      companyKeywords?: string;
+      geoId?: string;
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const { discoverCount } = await import("./voyager-search");
+    const { kind, ...filters } = data;
+    return discoverCount(kind, filters);
+  });
+
+export const enrichPeopleFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      people: Array<{
+        name: string;
+        title?: string;
+        location?: string;
+        url: string;
+        slug?: string;
+        source?: string;
+        company?: string;
+        domain?: string;
+        linkedinUrl?: string;
+      }>;
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const { enrichPeople } = await import("./linkedin-public");
+    const hits = await enrichPeople(
+      data.people.map((p) => ({ ...p, slug: p.slug || p.name })),
+    );
+    return { hits };
+  });
+
+export const listSignalMonitorsFn = createServerFn({ method: "POST" })
+  .validator((data: Record<string, never> = {}) => data)
+  .handler(async () => {
+    const { listMonitors } = await import("./signals");
+    return { monitors: listMonitors() };
+  });
+
+export const listSignalEventsFn = createServerFn({ method: "POST" })
+  .validator((data: { monitorId?: string }) => data)
+  .handler(async ({ data }) => {
+    const { listEvents } = await import("./signals");
+    return { events: listEvents(data.monitorId) };
+  });
+
+export const saveSignalMonitorFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      id?: string;
+      name: string;
+      kind: import("./signals-catalog").SignalKind;
+      target: import("./signals-catalog").SignalTarget;
+      entities: string[];
+      topics?: string[];
+      query?: string;
+      url?: string;
+      location?: string;
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const { upsertMonitor } = await import("./signals");
+    return { monitor: upsertMonitor(data) };
+  });
+
+export const deleteSignalMonitorFn = createServerFn({ method: "POST" })
+  .validator((data: { id: string }) => data)
+  .handler(async ({ data }) => {
+    const { deleteMonitor } = await import("./signals");
+    deleteMonitor(data.id);
+    return { ok: true };
+  });
+
+export const runSignalMonitorFn = createServerFn({ method: "POST" })
+  .validator((data: { id: string }) => data)
+  .handler(async ({ data }) => {
+    const { runMonitor } = await import("./signals");
+    return runMonitor(data.id);
+  });
+
+export const findIcpFn = createServerFn({ method: "POST" })
+  .validator(
+    (data: {
+      website: string;
+      brief?: string;
+      customers?: Array<{ name?: string; domain: string; acv: number }>;
+      competitors?: string[];
+    }) => data,
+  )
+  .handler(async ({ data }) => {
+    const { findIcp } = await import("./icp-find");
+    return findIcp(data);
+  });
+

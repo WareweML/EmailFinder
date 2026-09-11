@@ -47,7 +47,7 @@ export function CompanySuggestInput({
       } finally {
         if (seq.current === id) setLoading(false);
       }
-    }, 220);
+    }, 320);
     return () => clearTimeout(t);
   }, [value]);
 

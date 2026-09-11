@@ -151,6 +151,20 @@ export interface DomainCrawlResult {
   description?: string | null;
   jobs?: Array<{ title: string; location: string; department: string }>;
   technologies?: Array<{ name: string; category: string }>;
+  fundingStage?: string | null;
+  totalFunding?: string | null;
+  latestFunding?: string | null;
+  revenue?: string | null;
+  similarCompanies?: import("./company-profile").SimilarCompany[];
+  logo?: string | null;
+  phone?: string | null;
+  tags?: string[];
+  foundedYear?: number | null;
+  emailProvider?: string | null;
+  social?: Array<{ network: string; url: string; handle?: string }>;
+  ticker?: string | null;
+  siteEmails?: string[];
+  company?: import("./company-find").CompanyFindData;
 }
 
 function decodeHtmlEntities(input: string): string {

@@ -478,173 +478,232 @@ export async function suggestCompanies(
 ): Promise<CompanySuggestion[]> {
   const q = raw.trim();
   if (q.length < 2) return [];
-  const n = compact(q);
 
-  const bag = new Map<string, CompanySuggestion>();
-  const add = (s: CompanySuggestion) => {
-    const d = s.domain.toLowerCase().replace(/^www\./, "");
-    if (!d.includes(".")) return;
-    if (!isApex(d) && s.source !== "seed" && s.source !== "index") return;
-    if (!relatedBrand(d, q) && s.source === "web") return;
+  if (looksLikeDomain(q)) {
+    const d = q
+      .replace(/^https?:\/\//, "")
+      .replace(/^www\./, "")
+      .split("/")[0]!
+      .toLowerCase();
+    return [
+      {
+        name: titleCaseBrand(d.split(".")[0]!),
+        domain: d,
+        confidence: 99,
+        source: "web",
+      },
+    ];
+  }
+
+  const queries = [
+    ...new Set(
+      [q, distinctiveTokens(q).slice(0, 2).join(" ")].filter((s) => s.length >= 2),
+    ),
+  ];
+  const packs = await Promise.all(
+    queries.flatMap((query) => [clearbitSuggest(query), brandfetchSearch(query)]),
+  );
+
+  const bag = new Map<string, { hit: CompanySuggestion; score: number }>();
+  const add = (hit: CompanySuggestion) => {
+    const d = hit.domain.toLowerCase().replace(/^www\./, "");
+    const score = domainScore(d, hit.name, q);
+    if (score < 0) return;
     const prev = bag.get(d);
-    if (!prev || s.confidence > prev.confidence) bag.set(d, { ...s, domain: d });
+    if (!prev || score > prev.score) {
+      bag.set(d, {
+        hit: {
+          ...hit,
+          domain: d,
+          confidence: Math.min(99, 50 + score),
+        },
+        score,
+      });
+    }
   };
+  for (const h of packs.flat()) add(h);
 
   for (const a of LOCAL_ALIASES) {
-    if (a.aliases.some((x) => x.startsWith(slug(q)) || slug(q).startsWith(x))) {
+    if (a.aliases.some((x) => compact(q).startsWith(x) || x.startsWith(compact(q)))) {
       add({ name: a.name, domain: a.domain, confidence: 96, source: "seed" });
     }
   }
-  for (const s of listSeededDomains()) {
-    if (s.company.toLowerCase().includes(slug(q)) || s.domain.includes(n)) {
-      add({ name: s.company, domain: s.domain, confidence: 90, source: "seed" });
-    }
+
+  return [...bag.values()]
+    .sort((a, b) => b.score - a.score || b.hit.confidence - a.hit.confidence)
+    .map((x) => x.hit)
+    .slice(0, limit);
+}
+
+const JUNK_HOST = new Set([
+  "bit.ly",
+  "t.co",
+  "ow.ly",
+  "goo.gl",
+  "tinyurl.com",
+  "lnkd.in",
+  "linktr.ee",
+  "fb.me",
+  "buff.ly",
+  "rebrand.ly",
+  "cutt.ly",
+  "facebook.com",
+  "instagram.com",
+  "twitter.com",
+  "x.com",
+  "youtube.com",
+  "youtu.be",
+  "tiktok.com",
+  "linkedin.com",
+  "licdn.com",
+  "google.com",
+  "apple.com",
+  "microsoft.com",
+  "amazon.com",
+  "wikipedia.org",
+  "schema.org",
+  "bing.com",
+  "wordpress.com",
+  "wix.com",
+  "squarespace.com",
+  "github.com",
+  "medium.com",
+  "linktr.ee",
+]);
+
+function distinctiveTokens(name: string): string[] {
+  return slug(name)
+    .split(/\s+/)
+    .filter((t) => t.length >= 3 && !LEGAL_NOISE.test(t) && t !== "trust");
+}
+
+function nameCloseness(apiName: string | undefined, company: string): number {
+  if (!apiName) return 0;
+  const a = compact(apiName);
+  const b = compact(company);
+  if (!a || !b) return 0;
+  if (a === b) return 100;
+  if (a.startsWith(b) || b.startsWith(a)) return 85;
+  if (a.includes(b) || b.includes(a)) return 70;
+  const ta = new Set(distinctiveTokens(apiName));
+  const tb = new Set(distinctiveTokens(company));
+  const inter = [...ta].filter((t) => tb.has(t));
+  if (inter.length >= 2) return 80;
+  if (inter.length === 1 && (inter[0]?.length ?? 0) >= 5) return 45;
+  return 0;
+}
+
+function domainScore(domain: string, apiName: string | undefined, company: string): number {
+  const host = domain.toLowerCase().replace(/^www\./, "");
+  if (JUNK_HOST.has(host) || host.split(".").length < 2) return -1;
+  if (host.length > 48) return -1;
+  const brand = (host.split(".")[0] ?? "").replace(/-/g, "");
+  if (!brand || brand.length < 2) return -1;
+  const tokens = distinctiveTokens(company);
+  const close = nameCloseness(apiName, company);
+
+  let s = close;
+  if (close >= 70) {
+    if (brand === compact(company)) s += 24;
+    if (host.endsWith(".com") && !host.endsWith(".com.au")) s += 12;
+    if (host.endsWith(".net") || host.endsWith(".org")) s -= 6;
+    if (brand.length <= 4 && /^[a-z0-9]+$/.test(brand) && host.endsWith(".com")) s += 22;
+    if (tokens[0] && brand === tokens[0]) s += 8;
+    return s;
   }
+
+  if (tokens[0] && (brand === tokens[0] || brand.startsWith(tokens[0]) || tokens[0].startsWith(brand))) s += 35;
+  if (tokens.length >= 2 && brand === tokens.slice(0, 2).join("")) s += 40;
+  if (tokens.some((t) => t.length >= 4 && brand.includes(t))) s += 15;
+  if (brand.length >= 4 && compact(company).includes(brand)) s += 20;
+  if (s < 35) return -1;
+  if (host.endsWith(".com") && !host.endsWith(".com.au")) s += 4;
+  return s;
+}
+
+async function wikidataWebsite(name: string): Promise<CompanySuggestion[]> {
   try {
-    for (const d of await listIndexedDomains()) {
-      const brand = d.split(".")[0] ?? d;
-      if (brand === n || brand.startsWith(n)) {
-        add({
-          name: titleCaseBrand(brand),
-          domain: d,
-          confidence: 84,
-          source: "index",
-        });
+    const sparql = `SELECT ?website ?itemLabel WHERE {
+      ?item rdfs:label ${JSON.stringify(name)}@en.
+      ?item wdt:P856 ?website.
+      SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
+    } LIMIT 3`;
+    const url = `https://query.wikidata.org/sparql?format=json&query=${encodeURIComponent(sparql)}`;
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(6000),
+      headers: {
+        Accept: "application/sparql-results+json",
+        "User-Agent": "Mailgraph/1.0",
+      },
+    });
+    if (!res.ok) return [];
+    const j = (await res.json()) as {
+      results?: { bindings?: Array<{ website?: { value?: string }; itemLabel?: { value?: string } }> };
+    };
+    return (j.results?.bindings ?? []).flatMap((b) => {
+      const raw = b.website?.value ?? "";
+      const host = raw.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0]?.toLowerCase();
+      if (!host || !host.includes(".")) return [];
+      return [
+        {
+          name: b.itemLabel?.value || name,
+          domain: host,
+          confidence: 92,
+          source: "clearbit" as const,
+        },
+      ];
+    });
+  } catch {
+    return [];
+  }
+}
+
+let secTickers: Map<string, string> | null = null;
+async function secTicker(name: string): Promise<string | undefined> {
+  try {
+    if (!secTickers) {
+      const res = await fetch("https://www.sec.gov/files/company_tickers.json", {
+        signal: AbortSignal.timeout(8000),
+        headers: { "User-Agent": "Mailgraph/1.0 contact@warewe.com", Accept: "application/json" },
+      });
+      if (!res.ok) return undefined;
+      const j = (await res.json()) as Record<string, { ticker?: string; title?: string }>;
+      secTickers = new Map();
+      for (const row of Object.values(j)) {
+        if (row.ticker && row.title) secTickers.set(compact(row.title), row.ticker.toLowerCase());
       }
     }
+    return secTickers.get(compact(name));
   } catch {
-    /* ignore */
+    return undefined;
   }
+}
 
-  if (looksLikeDomain(q)) {
-    const d = q.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0]!;
-    add({
-      name: titleCaseBrand(d.split(".")[0] ?? d),
-      domain: d,
-      confidence: 99,
-      source: "web",
-    });
-  }
+const domainCache = new Map<string, string | null>();
 
-  const [expanded, scanned, cb, bf, co, li] = await Promise.all([
-    expandSlugs(q),
-    urlscanPrefix(q),
-    clearbitSuggest(q),
-    brandfetchSearch(q),
-    companiesSearch(q),
-    searchLinkedInCompanies(q),
+export async function resolveCompanyDomain(name: string): Promise<string | undefined> {
+  const q = name.replace(/\s+/g, " ").trim();
+  if (q.length < 3) return undefined;
+  const key = q.toLowerCase();
+  if (domainCache.has(key)) return domainCache.get(key) || undefined;
+
+  const short = distinctiveTokens(q).slice(0, 2).join(" ");
+  const queries = [...new Set([q, short].filter((s) => s.length >= 3))];
+  const packs = await Promise.all([
+    ...queries.flatMap((query) => [clearbitSuggest(query), brandfetchSearch(query)]),
+    wikidataWebsite(q),
   ]);
-
-  const completed = new Set(expanded.filter((s) => s.length > n.length));
-
-  for (const slugBrand of expanded) {
-    const isDone = slugBrand.length > n.length;
-    for (const tld of isDone ? PROVE_TLDS : [".com", ".in"]) {
-      add({
-        name: titleCaseBrand(slugBrand),
-        domain: `${slugBrand}${tld}`,
-        confidence: isDone ? 88 : 52,
-        source: isDone ? "expand" : "web",
-      });
-    }
+  const ticker = await secTicker(q);
+  let best: { domain: string; score: number } | null = null;
+  for (const hit of packs.flat()) {
+    let score = domainScore(hit.domain, hit.name, q);
+    const brand = hit.domain.toLowerCase().replace(/^www\./, "").split(".")[0] ?? "";
+    if (ticker && brand === ticker) score += 28;
+    if (score < 0) continue;
+    const d = hit.domain.toLowerCase().replace(/^www\./, "");
+    if (!best || score > best.score) best = { domain: d, score };
   }
-
-  for (const s of scanned) add(s);
-  for (const hit of li) {
-    if (hit.website) {
-      add({
-        name: hit.name,
-        domain: hit.website,
-        confidence: 93,
-        source: "linkedin",
-      });
-    }
-  }
-  for (const s of [...cb, ...bf, ...co]) {
-    if (relatedBrand(s.domain, q)) add(s);
-  }
-
-  // Re-query Clearbit on the best expanded names (hectorbev → "hector beverages")
-  const extraNames = expanded
-    .filter((s) => s.length > n.length)
-    .slice(0, 2)
-    .map((s) =>
-      s.replace(/([a-z])([A-Z])/g, "$1 $2"),
-    );
-  if (extraNames.length) {
-    const more = await Promise.all(
-      extraNames.map((name) => clearbitSuggest(name.replace(/([a-z])(\d)/g, "$1 $2"))),
-    );
-    for (const s of more.flat()) {
-      if (relatedBrand(s.domain, q)) add(s);
-    }
-  }
-
-  const ranked = [...bag.values()].sort((a, b) => {
-    const ba = a.domain.split(".")[0] ?? "";
-    const bb = b.domain.split(".")[0] ?? "";
-    const ea = ba === n ? 2 : 0;
-    const eb = bb === n ? 2 : 0;
-    if (eb !== ea) return eb - ea;
-    const ca = completed.has(ba) ? 1 : 0;
-    const cbv = completed.has(bb) ? 1 : 0;
-    if (cbv !== ca) return cbv - ca;
-    return b.confidence - a.confidence;
-  });
-
-  const completions = ranked.filter((s) => {
-    const brand = s.domain.split(".")[0] ?? "";
-    return completed.has(brand) && brand.length > n.length;
-  });
-  const exacts = ranked.filter((s) => (s.domain.split(".")[0] ?? "") === n);
-  const rest = ranked.filter((s) => !completions.includes(s) && !exacts.includes(s));
-  const preferred = completions.filter((s) =>
-    companyLikeCompletion(s.domain.split(".")[0] ?? "", n),
-  );
-  const toProbe = [
-    ...preferred.slice(0, 6),
-    ...exacts.slice(0, 4),
-    ...completions.filter((s) => !preferred.includes(s)).slice(0, 2),
-    ...rest.slice(0, 2),
-  ].slice(0, 12);
-  const probes = await Promise.all(toProbe.map((s) => httpProbe(s.domain)));
-  const live = new Map(probes.map((p) => [p.domain, p]));
-
-  const out: CompanySuggestion[] = [];
-  for (const s of toProbe) {
-    const p = live.get(s.domain);
-    if (!p?.ok || p.parked) continue;
-    const brand = s.domain.split(".")[0] ?? "";
-    const isCompletion = completed.has(brand) || (brand.startsWith(n) && brand.length > n.length);
-    if (!p.confirmed && !isCompletion && brand !== n) continue;
-    const nameFromTitle =
-      p.title &&
-      p.title.length > 2 &&
-      p.title.length < 40 &&
-      !SALE_RE.test(p.title)
-        ? p.title
-        : null;
-    out.push({
-      ...s,
-      name: nameFromTitle || s.name,
-      confidence: scoreFor(s.domain, q, s.source, completed),
-    });
-  }
-
-  return out
-    .sort((a, b) => {
-      const ba = a.domain.split(".")[0] ?? "";
-      const bb = b.domain.split(".")[0] ?? "";
-      const pa = companyLikeCompletion(ba, n) ? 3 : 0;
-      const pb = companyLikeCompletion(bb, n) ? 3 : 0;
-      if (pb !== pa) return pb - pa;
-      const ea = ba === n ? 2 : 0;
-      const eb = bb === n ? 2 : 0;
-      if (eb !== ea) return eb - ea;
-      const ca = completed.has(ba) || (ba.startsWith(n) && ba.length > n.length) ? 1 : 0;
-      const cbv = completed.has(bb) || (bb.startsWith(n) && bb.length > n.length) ? 1 : 0;
-      if (cbv !== ca) return cbv - ca;
-      return b.confidence - a.confidence;
-    })
-    .slice(0, limit);
+  const domain = best && best.score >= 35 ? best.domain : null;
+  domainCache.set(key, domain);
+  return domain ?? undefined;
 }

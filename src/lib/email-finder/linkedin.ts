@@ -1,4 +1,5 @@
 import { parseFullName } from "./normalize";
+import { isPersonSlug } from "./identity-lock";
 import type { LinkedInParse, ParsedName } from "./types";
 
 /**
@@ -40,6 +41,15 @@ export function parseLinkedInUrl(input: string): LinkedInParse {
   }
 
   const slug = decodeURIComponent(match[1]).replace(/\/+$/, "");
+  if (!isPersonSlug(slug)) {
+    return {
+      profileUrl: href,
+      slug: "",
+      guessedName: null,
+      companyHint: url?.searchParams.get("company") ?? null,
+      domainHint: url?.searchParams.get("domain") ?? null,
+    };
+  }
   const guessedName = nameFromSlug(slug);
   const companyHint =
     url?.searchParams.get("company") ??

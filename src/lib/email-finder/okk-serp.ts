@@ -8,10 +8,22 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 const execFileAsync = promisify(execFile);
 
-const CONFIG_URL = process.env.OKK_PROXY_CONFIG_URL ?? "";
+function env(key: string): string {
+  if (process.env[key]) return process.env[key]!;
+  try {
+    const m = readFileSync("/workspace/.env", "utf8").match(new RegExp(`^${key}=(.*)$`, "m"));
+    return m?.[1]?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+const CONFIG_URL = env("OKK_PROXY_CONFIG_URL");
+const STATIC_LINE = env("OKK_PROXY");
 
 type ProxyAuth = {
   host: string;
@@ -37,12 +49,20 @@ function parseConfig(text: string): ProxyAuth | null {
 }
 
 function withNewIp(p: ProxyAuth): ProxyAuth {
-  const sid = randomBytes(4).toString("hex");
-  const user = p.user.replace(/-sid-[a-z0-9]+$/i, "") + `-sid-${sid}`;
+  const sid = randomBytes(9).toString("base64url").replace(/[^A-Za-z0-9]/g, "X");
+  let user = p.user.replace(/sessid-[A-Za-z0-9]+/i, `sessid-${sid}`);
+  if (user === p.user) user = p.user.replace(/-sid-[a-z0-9]+$/i, "") + `-sid-${sid}`;
   return { ...p, user };
 }
 
 export async function loadOkkProxy(): Promise<ProxyAuth | null> {
+  if (STATIC_LINE) {
+    const parsed = parseConfig(STATIC_LINE);
+    if (parsed) {
+      cached = { at: Date.now(), proxy: parsed };
+      return parsed;
+    }
+  }
   if (!CONFIG_URL) return cached?.proxy ?? null;
   if (cached && Date.now() - cached.at < 5 * 60_000) return cached.proxy;
   try {

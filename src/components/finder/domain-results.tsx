@@ -136,23 +136,7 @@ export function DomainResults({ result }: { result: WaterfallDomainResult }) {
         </div>
 
         <aside className="space-y-4">
-          <div className="rounded-xl border border-border bg-surface p-4 space-y-2">
-            <p className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
-              Company
-            </p>
-            <p className="font-medium">{result.companyName ?? result.domain}</p>
-            {result.description && (
-              <p className="text-sm text-fg-muted">{result.description}</p>
-            )}
-            {result.industry && (
-              <p className="text-sm">Industry: {result.industry}</p>
-            )}
-            {result.hq && <p className="text-sm">Address: {result.hq}</p>}
-            {result.companyType && (
-              <p className="text-sm">Type: {result.companyType}</p>
-            )}
-            {result.headcount && <p className="text-sm">{result.headcount}</p>}
-          </div>
+          <CompanyCard result={result} />
 
           {result.technologies && result.technologies.length > 0 && (
             <div className="rounded-xl border border-border bg-surface p-4 space-y-2">
@@ -185,8 +169,95 @@ export function DomainResults({ result }: { result: WaterfallDomainResult }) {
               </ul>
             </div>
           )}
+          {result.similarCompanies && result.similarCompanies.length > 0 && (
+            <div className="rounded-xl border border-border bg-surface p-4 space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+                Similar companies · {result.similarCompanies.length}
+              </p>
+              <ul className="space-y-2 text-sm">
+                {result.similarCompanies.slice(0, 12).map((c) => (
+                  <li key={c.name}>
+                    <p className="font-medium">{c.name}</p>
+                    <p className="text-xs text-fg-subtle">
+                      {[c.industry, c.size, c.location || c.country].filter(Boolean).join(" · ")}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </aside>
       </div>
+    </div>
+  );
+}
+
+function CompanyCard({ result }: { result: WaterfallDomainResult }) {
+  const c = result.company;
+  const row = (k: string, v?: string | number | null) =>
+    v ? (
+      <p className="text-sm">
+        <span className="text-fg-muted">{k}: </span>
+        {v}
+      </p>
+    ) : null;
+  return (
+    <div className="rounded-xl border border-border bg-surface p-4 space-y-2">
+      <p className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+        Company
+      </p>
+      <div className="flex items-center gap-3">
+        {c?.logo && (
+          <img src={c.logo} alt="" className="size-10 rounded-md border border-border" />
+        )}
+        <div>
+          <p className="font-medium">{c?.displayName ?? result.companyName ?? result.domain}</p>
+          {c?.headline && <p className="text-xs text-fg-muted italic">{c.headline}</p>}
+        </div>
+      </div>
+      {(c?.description ?? result.description) && (
+        <p className="text-sm text-fg-muted line-clamp-4">{c?.description ?? result.description}</p>
+      )}
+      {row("Industry", c?.industryV2 ?? result.industry)}
+      {row("LinkedIn ID", c?.linkedin.id)}
+      {row("Also known as", c?.alternativeNames?.join(", "))}
+      {row("Alt domains", c?.alternativeDomains?.join(", "))}
+      {row("HQ", result.hq ?? c?.location)}
+      {row("Continent", c?.continent)}
+      {row("Founded", c?.foundedYear)}
+      {row("Type", c?.companyType ?? result.companyType)}
+      {row("Employees", c?.metrics.employeesExact ?? result.headcount)}
+      {c?.metrics.employeeCountByCountry
+        ? row(
+            "Employees by country",
+            Object.entries(c.metrics.employeeCountByCountry)
+              .sort((a, b) => b[1] - a[1])
+              .map(([k, v]) => `${k} ${v}`)
+              .join(" · "),
+          )
+        : null}
+      {row("Revenue", c?.metrics.estimatedAnnualRevenue)}
+      {row("Size", c?.metrics.employees)}
+      {row("NAICS", c?.naics?.[0] ? `${c.naics[0].naicsCode} · ${c.naics[0].nationalIndustry}` : null)}
+      {row("Parent", c?.parent?.name ? `${c.parent.name}${c.parent.domain ? ` (${c.parent.domain})` : ""}` : null)}
+      {c?.affiliatedProfiles?.length ? row("Affiliates", c.affiliatedProfiles.map((a) => a.name).join(", ")) : null}
+      {c?.site.emailAddresses?.length ? (
+        <p className="text-sm">
+          <span className="text-fg-muted">Emails: </span>
+          {c.site.emailAddresses.slice(0, 6).join(", ")}
+        </p>
+      ) : null}
+      {c?.offices && c.offices.length > 0 && (
+        <div className="pt-2 border-t border-border space-y-1">
+          <p className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">Offices</p>
+          {c.offices.map((o, i) => (
+            <p key={i} className="text-sm">
+              {[o.streetAddress, o.city, o.state, o.postalCode, o.country].filter(Boolean).join(", ")}
+              {o.isPrimary ? " (HQ)" : ""}
+            </p>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
