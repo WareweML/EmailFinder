@@ -324,6 +324,7 @@ export async function findPersonMobile(opts: {
   instagram?: string;
   serpRows?: Array<{ title?: string; description?: string; link?: string }>;
 }): Promise<MobileHit | null> {
+  if (!opts.company && !opts.domain) return null;
   const key = cacheKey({ fullName: opts.fullName, domain: opts.domain, linkedinUrl: opts.linkedinUrl });
   const cached = cacheGet(key);
   if (cached) return tagWa({ e164: cached.e164, display: cached.display, source: `${cached.source}+cache` });

@@ -1,11 +1,10 @@
 /**
  * LinkedIn Sales Navigator lead search.
- * Product cap is 2,500 named leads per query — that is the number
- * every small hunter-clone exports. Requires an active Sales Nav seat
- * on the cookie (salesApiLeadSearch → 403 SALES_SEAT_REQUIRED otherwise).
+ * Prefers ApiAlt when APIALT_KEY is set (no personal cookies).
+ * Cookie path is fail-closed: never sent if ApiAlt is configured.
  */
 
-import { readFileSync } from "node:fs";
+import { loadLiSession, restLiQuery } from "./linkedin-http";
 
 export type SalesNavPerson = {
   name: string;
@@ -21,33 +20,23 @@ export type SalesNavFilters = {
   firstName?: string;
   lastName?: string;
   title?: string;
+  pastTitle?: string;
   companyKeywords?: string;
+  companyName?: string;
+  companyId?: string;
+  pastCompanyId?: string;
+  pastCompanyName?: string;
+  school?: string;
+  language?: string;
+  skills?: string;
   hqGeoId?: string;
   geoId?: string;
   sizeId?: string;
   industryId?: string;
+  revenueBand?: string;
+  growthBand?: string;
+  hiringOnly?: boolean;
 };
-
-const SESSION_FILE = "/workspace/data/li-session.json";
-
-function loadSession(): { liAt: string; jsession: string; liA?: string } | null {
-  if (process.env.LI_USE_SESSION !== "1") return null;
-  const liAt = process.env.LI_AT;
-  const jsession = process.env.LI_JSESSIONID;
-  const liA = process.env.LI_A;
-  if (liAt && jsession) return { liAt, jsession, liA };
-  try {
-    const j = JSON.parse(readFileSync(SESSION_FILE, "utf8")) as {
-      liAt?: string;
-      jsession?: string;
-      liA?: string;
-    };
-    if (j.liAt && j.jsession) return { liAt: j.liAt, jsession: j.jsession, liA: j.liA };
-  } catch {
-    /* none */
-  }
-  return null;
-}
 
 function txt(v: unknown): string | undefined {
   if (!v) return undefined;
@@ -121,9 +110,10 @@ export function salesNavQuery(f: SalesNavFilters, companyIds: string[]): string 
     .join(" ")
     .replace(/[()]/g, " ")
     .trim();
-  const kwPart = kw ? `keywords:${JSON.stringify(kw)},` : "";
-  const filterPart = filters.length ? `filters:List(${filters.join(",")})` : "";
-  return `(recentSearchParam:(id:1,doLogHistory:true),${kwPart}${filterPart})`;
+  const parts = ["recentSearchParam:(id:0,doLogHistory:!f)"];
+  if (kw) parts.push(`keywords:${JSON.stringify(kw)}`);
+  parts.push(`filters:List(${filters.join(",")})`);
+  return `(${parts.join(",")})`;
 }
 
 function parseLeads(included: Array<Record<string, unknown>>): SalesNavPerson[] {
@@ -225,7 +215,7 @@ async function page(
   const { liGet } = await import("./linkedin-http");
   const url =
     "https://www.linkedin.com/sales-api/salesApiLeadSearch" +
-    `?q=searchQuery&query=${encodeURIComponent(query)}` +
+    `?q=searchQuery&query=${restLiQuery(query)}` +
     `&start=${start}&count=${count}&decorationId=com.linkedin.sales.deco.desktop.searchv2.LeadSearchResult-14`;
   const res = await liGet(url, "https://www.linkedin.com/sales/search/people");
   if (res.status !== 200) {
@@ -255,14 +245,18 @@ export type SalesNavResult = {
   ms: number;
 };
 
-/** Page Sales Nav up to 2,500 named leads (product cap). */
+/** Page Sales Nav. ApiAlt first; personal cookies only if no API key. */
 export async function salesNavLeadSearch(
   f: SalesNavFilters,
   companyIds: string[] = [],
   max = 2500,
 ): Promise<SalesNavResult> {
+  const { apialtEnabled, apialtLeadSearch } = await import("./apialt");
+  if (apialtEnabled()) {
+    return apialtLeadSearch(f, companyIds, Math.min(max, 50));
+  }
   const t0 = Date.now();
-  const sess = loadSession();
+  const sess = loadLiSession();
   if (!sess) {
     return { seat: false, total: 0, hits: [], companies: [], detail: "no cookie", ms: 0 };
   }

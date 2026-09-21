@@ -1,13 +1,12 @@
 /**
  * Last-2/4 recovery hints. Instagram/Facebook lookup via Okk residential.
- * LinkedIn: voyager profileContactInfo (logged-in, 1st-degree only) — reset
- * flow emails a code and does not print last digits.
+ * Never call LinkedIn from here — extra Voyager hits after a profile read
+ * are what log the Sales Nav seat out.
  */
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { loadOkkProxy } from "./okk-serp";
-import { liGet, loadLiSession } from "./linkedin-http";
 
 const execFileAsync = promisify(execFile);
 
@@ -84,47 +83,17 @@ async function facebookHints(email: string): Promise<Hint[]> {
   return extractHints(page.body, "facebook-identify");
 }
 
-async function linkedinContact(linkedinUrl?: string): Promise<Hint[]> {
-  const sess = loadLiSession();
-  const vanity = (linkedinUrl ?? "").match(/linkedin\.com\/in\/([^/?#]+)/i)?.[1];
-  if (!sess || !vanity) return [];
-  try {
-    const res = await liGet(
-      `https://www.linkedin.com/voyager/api/identity/profiles/${encodeURIComponent(vanity)}/profileContactInfo`,
-      "https://www.linkedin.com/in/" + vanity + "/",
-    );
-    if (res.status !== 200 || !res.body) return [];
-    const hints = extractHints(res.body, "linkedin-contact");
-    const j = JSON.parse(res.body) as {
-      data?: { phoneNumbers?: Array<{ number?: string; phoneNumber?: { number?: string } }> };
-      phoneNumbers?: Array<{ number?: string }>;
-    };
-    const nums = [
-      ...(j.phoneNumbers ?? []),
-      ...(j.data?.phoneNumbers ?? []),
-    ];
-    for (const n of nums) {
-      const raw = n.number || n.phoneNumber?.number;
-      if (raw) hints.push({ raw, source: "linkedin-contact" });
-    }
-    return hints;
-  } catch {
-    return [];
-  }
-}
-
 export async function recoveryHints(opts: {
   email?: string;
   instagram?: string;
   linkedinUrl?: string;
 }): Promise<Hint[]> {
   const id = opts.instagram || opts.email;
-  const [ig, fb, li] = await Promise.all([
+  const [ig, fb] = await Promise.all([
     id ? instagramHints(id) : Promise.resolve([]),
     opts.email ? facebookHints(opts.email) : Promise.resolve([]),
-    linkedinContact(opts.linkedinUrl),
   ]);
-  return [...ig, ...fb, ...li];
+  return [...ig, ...fb];
 }
 
 export async function okkProxyReady(): Promise<boolean> {

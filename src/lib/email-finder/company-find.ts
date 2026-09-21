@@ -10,6 +10,7 @@ import { lookupMx } from "./dns";
 import { detectTechStack, type TechHit } from "./tech-stack";
 import { extractPhones } from "./phone-extract";
 import { enrichCompanyProfile } from "./company-profile";
+import { companyNameFitsDomain, compact, distinctiveTokens, isCollisionBrand, linkedinFitsDomain, spacedBrand } from "./identity-lock";
 import {
   affiliatesFromSocial,
   archiveHeadcount,
@@ -241,10 +242,17 @@ function networkOf(url: string): { network: string; handle?: string } | null {
     return { network: "linkedin", handle: handle(/linkedin\.com\/company\/([^/?#]+)/i) };
   if (/(twitter\.com|x\.com)\//i.test(url) && !/intent|share/i.test(url))
     return { network: "twitter", handle: handle(/(?:twitter|x)\.com\/@?([A-Za-z0-9_]+)/i) };
-  if (/facebook\.com\//i.test(url) && !/sharer|dialog/i.test(url))
+  if (/facebook\.com\//i.test(url) && !/sharer|dialog|\/reel\/|\/watch\/|\/share\//i.test(url))
     return { network: "facebook", handle: handle(/facebook\.com\/(?:pages\/[^/]+\/)?([^/?#]+)/i) };
-  if (/instagram\.com\//i.test(url))
-    return { network: "instagram", handle: handle(/instagram\.com\/([^/?#]+)/i) };
+  if (/instagram\.com\//i.test(url)) {
+    const h = handle(/instagram\.com\/([^/?#]+)/i);
+    if (
+      h &&
+      /^(reel|reels|p|stories|explore|accounts|about|legal|tv|tags|directory|share|ar|ids)$/i.test(h)
+    )
+      return null;
+    return { network: "instagram", handle: h };
+  }
   if (/youtube\.com\/(channel|c|@|user)\//i.test(url) || /youtube\.com\/@/i.test(url))
     return { network: "youtube", handle: handle(/youtube\.com\/(?:channel\/|c\/|user\/|@)?([^/?#]+)/i) };
   if (/crunchbase\.com\/organization\//i.test(url))
@@ -305,6 +313,13 @@ function parseSite(html: string, domain: string, pageUrl: string): SiteFacts {
     const t = decode(title).split(/[|\-–—]/)[0]?.trim();
     if (t && t.length < 60 && new RegExp(domain.split(".")[0]!, "i").test(t)) facts.name = t;
   }
+  if (!facts.name) {
+    const pretty = spacedBrand(domain.split(".")[0] ?? domain);
+    const re = new RegExp(pretty.split(/\s+/).filter(Boolean).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+"), "i");
+    const blob = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ");
+    const hit = blob.match(re)?.[0]?.replace(/\s+/g, " ").trim();
+    if (hit && hit.length < 60) facts.name = hit;
+  }
 
   for (const o of jsonLd(html)) {
     if (!isOrg(o) && !o.address && !o.telephone) continue;
@@ -331,6 +346,27 @@ function parseSite(html: string, domain: string, pageUrl: string): SiteFacts {
       facts.state = str(addr.addressRegion);
       facts.postal = str(addr.postalCode);
       facts.country = str(addr.addressCountry);
+    }
+  }
+
+  if (!facts.city) {
+    const loc = html.match(
+      /\b((?:New\s+)?[A-Z][a-z]{3,}(?:\s+[A-Z][a-z]{3,})?),\s*((?:Tamil\s+Nadu|New\s+South\s+Wales|British\s+Columbia|[A-Z][a-z]{3,}(?:\s+[A-Z][a-z]+)?))\b/,
+    );
+    const known = html.match(
+      /\b(Gurugram|Gurgaon|Noida|Bengaluru|Bangalore|Hyderabad|Mumbai|Pune|Chennai|Kolkata|Jaipur|Ahmedabad|Chandigarh|New\s+Delhi|Delhi|Jasola)\b/i,
+    );
+    const slogan =
+      /global scale|local impact|end-to-end|digital.?first|customer journey|built for|empowering|innovation|leading|trusted/i;
+    if (known) {
+      const city = known[1]!.replace(/\s+/g, " ");
+      facts.city = facts.city || (/jasola/i.test(city) ? "New Delhi" : city);
+      if (/gurgaon|gurugram/i.test(city)) facts.state = facts.state || "Haryana";
+      if (/delhi|jasola/i.test(city)) facts.state = facts.state || "Delhi";
+      facts.country = facts.country || "India";
+    } else if (loc && !/instagram|linkedin|facebook/i.test(loc[0]) && !slogan.test(loc[0])) {
+      facts.city = loc[1];
+      facts.state = loc[2];
     }
   }
 
@@ -567,6 +603,8 @@ function isCompanyName(s: string | null | undefined): s is string {
   const t = s.trim();
   if (t.length < 2 || t.length > 80) return false;
   if (/^UC[\w-]{20,}$/i.test(t)) return false;
+  if (/^(reel|reels|share|watch|posts|photos?|about|privacy|login|home|explore)$/i.test(t)) return false;
+  if (/^dr\.?\s+[a-z]/i.test(t) && !/\b(dental|clinic|hospital|solutions|care)\b/i.test(t)) return false;
   if (/sign in|cookie policy|user agreement|sitemap|^html>?$|linkedin'?s user/i.test(t)) return false;
   if (/^https?:/i.test(t) || /youtube\.com|youtu\.be/i.test(t)) return false;
   if (/^[\d._-]+$/.test(t)) return false;
@@ -935,13 +973,19 @@ async function guestLinkedIn(domain: string, nameHint: string) {
         .trim()
         .slice(0, 80);
       if (/[<>]|employees, jobs|^\s*html\b/i.test(name)) continue;
-      const empPlus = html.body.match(/([\d,]+)\+\s*employees/i)?.[1]?.replace(/,/g, "");
-      const emp = empPlus ?? html.body.match(/([\d,]+)\s*employees/i)?.[1]?.replace(/,/g, "");
       const about = (label: string, max = 80) =>
         html.body
           .match(new RegExp(`${label}\\s*</dt>\\s*<dd[^>]*>\\s*([^<]{2,${max}})`, "i"))?.[1]
           ?.replace(/\s+/g, " ")
           .trim();
+      const website =
+        html.body.match(/Website\s*<\/dt>\s*<dd[^>]*>[\s\S]{0,240}?href="(https?:\/\/[^"]+)"/i)?.[1] ||
+        about("Website", 120);
+      if (!linkedinFitsDomain({ website, name, domain })) {
+        if (isCollisionBrand(domain) || !companyNameFitsDomain(name, domain)) continue;
+      }
+      const empPlus = html.body.match(/([\d,]+)\+\s*employees/i)?.[1]?.replace(/,/g, "");
+      const emp = empPlus ?? html.body.match(/([\d,]+)\s*employees/i)?.[1]?.replace(/,/g, "");
       const foundedRaw = about("Founded", 20);
       const fy = foundedRaw?.match(/(1[89]\d{2}|20\d{2})/)?.[1];
       const specs = (about("Specialties", 700) ?? "")
@@ -996,12 +1040,13 @@ async function guestLinkedIn(domain: string, nameHint: string) {
 }
 
 async function resolveAltDomains(stems: string[], self: string): Promise<string[]> {
+  const skip = /^(reel|reels|facebook|instagram|twitter|youtube|linkedin|google|github|whatsapp|tiktok)\.com$/i;
   const out: string[] = [];
   await Promise.all(
     stems.slice(0, 3).map(async (stem) => {
       for (const tld of [".com", ".io", ".ai"]) {
-        const d = `${stem}${tld}`;
-        if (d === self) continue;
+        const d = `${stem.replace(/[^a-z0-9-]/gi, "")}${tld}`;
+        if (d === self || skip.test(d) || stem.length < 5) continue;
         const r = await resilientFetch(`https://${d}`, { timeoutMs: 2500, maxAttempts: 1 }).catch(
           () => ({ ok: false as const }),
         );
@@ -1130,6 +1175,9 @@ export async function findCompany(domainInput: string): Promise<CompanyFindRespo
   if (phones.phones.length) sources.push("phones");
 
   const name = (
+    (site.name && distinctiveTokens(site.name, domain).length && isCompanyName(site.name)
+      ? site.name
+      : null) ||
     (li?.name && isCompanyName(li.name) ? li.name : null) ||
     (site.name && isCompanyName(site.name) ? site.name : null) ||
     hint
@@ -1140,7 +1188,12 @@ export async function findCompany(domainInput: string): Promise<CompanyFindRespo
       social
         .filter((s) => s.network !== "youtube" && s.network !== "github")
         .map((s) => (s.handle ?? "").replace(/^@/, ""))
-        .filter((h) => h && !brandRe.test(h) && isCompanyName(h) && !/^UC[\w-]{20,}$/i.test(h))
+        .filter((h) => {
+          if (!h || brandRe.test(h) || !isCompanyName(h) || /^UC[\w-]{20,}$/i.test(h)) return false;
+          const stem = compact(h.replace(/[-_]?(cloud|official|inc|dev|hq|ai|app|gurgaon|official)$/i, ""));
+          const brand = compact(domain.split(".")[0] ?? domain);
+          return stem.length >= 5 && (stem.includes(brand) || brand.includes(stem));
+        })
         .map((h) => h.replace(/[-_]?(cloud|official|inc|dev|hq|ai|app)$/i, ""))
         .filter((s) => s.length >= 4),
     ),
@@ -1150,6 +1203,8 @@ export async function findCompany(domainInput: string): Promise<CompanyFindRespo
     enrichCompanyProfile(domain, name, [], {
       description: site.description || li?.description,
       industry: li?.industry,
+      location: li?.hq || [site.city, site.state, site.country].filter(Boolean).join(", "),
+      country: site.country || undefined,
     }).catch(() => ({
       similar: [] as CompanyFindData["similarCompanies"],
       fundingStage: undefined as string | undefined,
@@ -1174,6 +1229,18 @@ export async function findCompany(domainInput: string): Promise<CompanyFindRespo
   if (wiki.name || wiki.foundedYear) sources.push("wikidata");
   if (profile.similar.length || profile.revenue) sources.push("profile");
   if (geoHit) sources.push("nominatim");
+
+  const related = await import("./company-suggest")
+    .then((m) =>
+      m.relatedCompanyDomains({
+        name,
+        domain,
+        html: home.ok ? home.body : "",
+        description: [li?.description, site.description, li?.headline].filter(Boolean).join(" "),
+      }),
+    )
+    .catch(() => [] as Array<{ name: string; domain: string; hasMx: boolean; relation: "brand" | "previous" }>);
+  if (related.length) sources.push("related-domains");
 
   const phoneSet = new Set<string>();
   for (const p of phones.phones) phoneSet.add(p.phone);
@@ -1218,11 +1285,12 @@ export async function findCompany(domainInput: string): Promise<CompanyFindRespo
   const staff = li?.staffCount ?? (wiki.employees ? Number(wiki.employees) : undefined);
   const employees = employeesRange(staff, li?.size);
   const primaryOffice = (li as { offices?: CompanyFindData["offices"] } | null)?.offices?.[0];
+  const sloganHq = /global scale|local impact|end-to-end|digital.?first|built for|empowering/i;
   const city =
     primaryOffice?.city ||
     site.city ||
     geoHit?.city ||
-    li?.hq?.split(",")[0]?.trim() ||
+    (li?.hq && !sloganHq.test(li.hq) ? li.hq.split(",")[0]?.trim() : undefined) ||
     wiki.hq ||
     null;
   const country =
@@ -1230,12 +1298,14 @@ export async function findCompany(domainInput: string): Promise<CompanyFindRespo
     countryNameOf(site.country) ||
     countryNameOf(geoHit?.country) ||
     countryNameOf(wiki.country) ||
-    countryNameOf(li?.hq?.split(",").slice(-1)[0]?.trim()) ||
+    (li?.hq && !sloganHq.test(li.hq)
+      ? countryNameOf(li.hq.split(",").slice(-1)[0]?.trim())
+      : undefined) ||
     null;
   const countryCode = country ? CC[country.toLowerCase()] ?? null : null;
   const state = site.state ?? primaryOffice?.state ?? geoHit?.state ?? null;
   const location =
-    li?.hq ||
+    (li?.hq && !sloganHq.test(li.hq) ? li.hq : undefined) ||
     [site.street, city, state, country].filter(Boolean).join(", ") ||
     wiki.hq ||
     null;
@@ -1293,10 +1363,15 @@ export async function findCompany(domainInput: string): Promise<CompanyFindRespo
       [
         wiki.parent && wiki.parent.toLowerCase() !== name.toLowerCase() ? wiki.parent : undefined,
         ...akaStems.map((s) => s.charAt(0).toUpperCase() + s.slice(1)),
+        ...related.map((r) => r.name),
       ].filter((x): x is string => isCompanyName(x) && x.toLowerCase() !== name.toLowerCase()),
     ),
   ];
-  const alternativeDomains = [...new Set(altDomains.filter((d) => d !== domain))];
+  const alternativeDomains = [
+    ...new Set(
+      [...altDomains, ...related.map((r) => r.domain)].filter((d) => d && d !== domain),
+    ),
+  ];
   const liId = (li as { linkedinId?: string } | null)?.linkedinId ?? null;
   const headline = (li as { headline?: string } | null)?.headline ?? null;
   const followers = (li as { followers?: number } | null)?.followers ?? null;

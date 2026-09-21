@@ -14,6 +14,7 @@ import type { LinkedInParse, ParsedName } from "./types";
  *  - https://linkedin.com/in/jane-doe-a1b2c3/
  *  - https://www.linkedin.com/in/jane-doe?company=Acme
  *  - linkedin.com/in/first-last-12345
+ *  - https://www.linkedin.com/in/gaurav-dhama-160496411/  (numeric uniqueness suffix)
  */
 export function parseLinkedInUrl(input: string): LinkedInParse {
   const raw = input.trim();

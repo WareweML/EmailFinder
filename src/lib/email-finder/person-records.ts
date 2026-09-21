@@ -280,7 +280,7 @@ async function genderOf(first: string): Promise<string | null> {
   return null;
 }
 
-async function companyLite(domain: string, name: string) {
+export async function companyLite(domain: string, name: string) {
   const brand = domain.split(".")[0]!;
   const tld = domain.split(".").slice(1).join(".");
   const slugs = [`${brand}-${tld}`, `${brand}ai`, name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""), brand].filter(
@@ -356,6 +356,7 @@ export async function harvestRecords(input: {
   domain?: string;
   locationHint?: string;
   guestHtml?: string | null;
+  linkedinSlug?: string;
 }): Promise<RecordHit> {
   const sources: string[] = [];
   const emptyLoc = {
@@ -376,23 +377,32 @@ export async function harvestRecords(input: {
   const { decodoSearch, decodoShards } = await import("./decodo-serp");
   const [gender, pages, co, guest, site] = await Promise.all([
     genderOf(input.first),
-    decodoShards([
-      `"${input.fullName}"${input.company ? ` "${input.company}"` : ""} (phone OR mobile)`,
-      `site:rocketreach.co "${input.fullName}"${input.company ? ` "${input.company}"` : ""}`,
-      `site:datanyze.com "${input.fullName}"${input.company ? ` "${input.company}"` : ""}`,
-      `site:instagram.com "${input.fullName}"${input.company ? ` "${input.company}"` : ""}`,
-      `site:tofler.in "${input.fullName}" director`,
-      `site:filesure.in/director "${input.fullName}"`,
-      `"${input.fullName}" "${input.domain ?? input.company ?? ""}" (director OR "co-founder")`,
-      `site:adapt.io "${input.fullName}"${input.company ? ` "${input.company}"` : ""}`,
-      `site:behance.net "${input.fullName}"${input.company ? ` "${input.company}"` : ""}`,
-      input.company
-        ? `"${input.fullName}" "${input.company}" (@gmail.com OR @yahoo.com OR @icloud.com)`
-        : `"${input.fullName}" "@gmail.com"`,
-      input.domain && input.first
-        ? `"${input.first.toLowerCase()}@${input.domain.replace(/^www\./, "")}"`
-        : "",
-    ].filter(Boolean)),
+    decodoShards(
+      (input.linkedinSlug
+        ? [
+            `site:linkedin.com/in/${input.linkedinSlug}`,
+            `site:rocketreach.co "${input.linkedinSlug}"`,
+            `"linkedin.com/in/${input.linkedinSlug}"`,
+          ]
+        : [
+            `"${input.fullName}"${input.company ? ` "${input.company}"` : ""} (phone OR mobile)`,
+            `site:rocketreach.co "${input.fullName}"${input.company ? ` "${input.company}"` : ""}`,
+            `site:datanyze.com "${input.fullName}"${input.company ? ` "${input.company}"` : ""}`,
+            `site:instagram.com "${input.fullName}"${input.company ? ` "${input.company}"` : ""}`,
+            `site:tofler.in "${input.fullName}" director`,
+            `site:filesure.in/director "${input.fullName}"`,
+            `"${input.fullName}" "${input.domain ?? input.company ?? ""}" (director OR "co-founder")`,
+            `site:adapt.io "${input.fullName}"${input.company ? ` "${input.company}"` : ""}`,
+            `site:behance.net "${input.fullName}"${input.company ? ` "${input.company}"` : ""}`,
+            input.company
+              ? `"${input.fullName}" "${input.company}" (@gmail.com OR @yahoo.com OR @icloud.com)`
+              : `"${input.fullName}" "@gmail.com"`,
+            input.domain && input.first
+              ? `"${input.first.toLowerCase()}@${input.domain.replace(/^www\./, "")}"`
+              : "",
+          ]
+      ).filter(Boolean),
+    ),
     input.domain ? companyLite(input.domain, input.company ?? input.domain.split(".")[0]!) : Promise.resolve(null),
     Promise.resolve(input.guestHtml ? parseLinkedInGuest(input.guestHtml) : {}),
     input.domain ? personFromEmployerSite(input.domain.replace(/^www\./, ""), input.fullName) : Promise.resolve({ title: null, summary: null, location: null, phone: null }),
@@ -429,7 +439,7 @@ export async function harvestRecords(input: {
   }
 
   const blobParts: string[] = [];
-  if (!input.company) {
+  if (!input.company && !input.linkedinSlug) {
     const unpanUrl = `https://unpan.org/name/${slug}`;
     try {
       const page = await resilientFetch(unpanUrl, { timeoutMs: 8000, maxAttempts: 3, preferBot: true });
@@ -446,6 +456,11 @@ export async function harvestRecords(input: {
     const url = (row.link ?? "").split("?")[0] ?? "";
     const title = row.title ?? "";
     const desc = row.description ?? "";
+    if (input.linkedinSlug) {
+      const s = input.linkedinSlug.toLowerCase();
+      if (!url.toLowerCase().includes(s) && !`${title} ${desc}`.toLowerCase().includes(s))
+        continue;
+    }
     if (!selfRow(title, url, input.fullName, input.company, desc))
       continue;
     blobParts.push(`${title} ${desc}`);
@@ -495,7 +510,7 @@ export async function harvestRecords(input: {
   const preferIn = /\.in$|\.au$|india|australia|gurugram|gurgaon|sydney/i.test(
     `${input.domain ?? ""} ${input.company ?? ""} ${blob}`,
   );
-  const phones = phonesIn(blob, preferIn);
+  const phones = (input.company || input.domain) ? phonesIn(blob, preferIn) : [];
   if (phones.length) {
     hit.phone_numbers = phones.slice(0, 6);
     hit.mobile_phone = phones[0] ?? null;

@@ -3,8 +3,10 @@ import {
   Check,
   Copy,
   ExternalLink,
+  Search,
   ShieldCheck,
   ShieldQuestion,
+  Target,
   User,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -13,6 +15,8 @@ import type { WaterfallDomainResult } from "@/lib/email-finder/waterfall";
 import { WaterfallTrail } from "./waterfall-trail";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { writeIcpDiscoverQuery } from "@/lib/email-finder/icp-discover-bridge";
+import { companyIcpLines, companyToDiscover } from "@/lib/email-finder/icp-to-discover";
 
 type Named = NonNullable<WaterfallDomainResult["people"]>[number];
 
@@ -83,6 +87,9 @@ export function DomainResults({ result }: { result: WaterfallDomainResult }) {
         <p className="font-medium">
           {named.length} live people
           {result.headcount ? ` · LinkedIn lists ${result.headcount}` : ""}
+          {(result as { titleFilter?: string }).titleFilter
+            ? ` · filter: ${(result as { titleFilter?: string }).titleFilter}`
+            : ""}
         </p>
         <p className="text-xs text-fg-subtle">{result.durationMs}ms</p>
       </div>
@@ -169,24 +176,73 @@ export function DomainResults({ result }: { result: WaterfallDomainResult }) {
               </ul>
             </div>
           )}
-          {result.similarCompanies && result.similarCompanies.length > 0 && (
-            <div className="rounded-xl border border-border bg-surface p-4 space-y-2">
-              <p className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
-                Similar companies · {result.similarCompanies.length}
-              </p>
-              <ul className="space-y-2 text-sm">
-                {result.similarCompanies.slice(0, 12).map((c) => (
-                  <li key={c.name}>
-                    <p className="font-medium">{c.name}</p>
-                    <p className="text-xs text-fg-subtle">
-                      {[c.industry, c.size, c.location || c.country].filter(Boolean).join(" · ")}
-                    </p>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+          <CompanyIcpCard result={result} />
         </aside>
+      </div>
+    </div>
+  );
+}
+
+function icpSeed(result: WaterfallDomainResult) {
+  const c = result.company;
+  const titles = (result.people ?? [])
+    .filter((p) => p.seniority === "decision" && p.title)
+    .map((p) => p.title!)
+    .slice(0, 8);
+  return {
+    name: c?.displayName ?? result.companyName ?? result.domain,
+    domain: result.domain,
+    industry: c?.industryV2 ?? result.industry,
+    description: c?.description ?? result.description,
+    hq: result.hq ?? c?.location,
+    country: c?.geo.country ?? null,
+    size: result.headcount ?? c?.metrics.employees,
+    staffCount: c?.metrics.employeesExact ?? null,
+    tags: (result.tags ?? c?.tags ?? []) as string[],
+    titles,
+    companyType: c?.companyType ?? result.companyType,
+  };
+}
+
+function CompanyIcpCard({ result }: { result: WaterfallDomainResult }) {
+  const seed = icpSeed(result);
+  const lines = companyIcpLines(seed);
+  const open = (kind: "companies" | "people") => {
+    const q = companyToDiscover(seed, kind);
+    writeIcpDiscoverQuery(q);
+    toast.success(`Discover · ${kind} filters loaded from ${seed.name}`);
+  };
+  return (
+    <div className="rounded-xl border border-border bg-surface p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <Target className="size-3.5 text-fg-muted" />
+        <p className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+          ICP · {seed.name}
+        </p>
+      </div>
+      {lines.length === 0 ? (
+        <p className="text-sm text-fg-muted">Not enough firmographics yet to seed Discover.</p>
+      ) : (
+        <dl className="space-y-1.5">
+          {lines.map((l) => (
+            <div key={l.k} className="text-sm">
+              <span className="text-fg-muted">{l.k}: </span>
+              {l.v}
+            </div>
+          ))}
+        </dl>
+      )}
+      <p className="text-xs text-fg-subtle">
+        Similar companies are a Discover search — industry, HQ, size, keywords — not other firms that share the letters in the name.
+      </p>
+      <div className="flex flex-col gap-2">
+        <Button size="sm" className="w-full" onClick={() => open("companies")}>
+          <Search className="size-3.5" />
+          Search similar companies
+        </Button>
+        <Button size="sm" variant="secondary" className="w-full" onClick={() => open("people")}>
+          Search ICP people
+        </Button>
       </div>
     </div>
   );

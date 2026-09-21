@@ -1,14 +1,22 @@
 /**
- * ICP Finder — SparkToro-style audience report, revenue-weighted.
- * Not a generic persona. Hangouts, bios, podcasts, keywords, apps
- * inferred from paying customers + competitors + live public overlap.
+ * ICP Finder — SparkToro-style, ROAS-weighted.
+ * Built from person enrich + company enrich of the people who paid,
+ * not from each logo's job board or Google autocomplete.
  */
 
-import { resilientFetch } from "./http";
-import { detectTechStack } from "./tech-stack";
 import { parseRss } from "./signals-sources";
+import { classifyTitle } from "./title-taxonomy";
+import type { PersonFindData } from "./person-find";
+import type { CompanyFindData } from "./company-find";
+import { buildAudiencePrompt, sparkToroFullReport, stToAffinity } from "./sparktoro";
+import { saveIcpReport } from "./icp-store";
 
-export type IcpCustomerIn = { name?: string; domain: string; acv: number };
+export type IcpCustomerIn = {
+  email?: string;
+  name?: string;
+  domain?: string;
+  acv?: number;
+};
 
 export type IcpInput = {
   website: string;
@@ -35,15 +43,39 @@ export type IcpSegment = {
   evidence: string[];
 };
 
+export type IcpBuyer = {
+  email: string | null;
+  name: string | null;
+  title: string | null;
+  role: string | null;
+  seniority: string | null;
+  company: string | null;
+  domain: string;
+  industry: string | null;
+  size: string | null;
+  location: string | null;
+  linkedin: string | null;
+  twitter: string | null;
+  acv: number;
+  sharePct: number;
+  sources: string[];
+};
+
 export type IcpReport = {
   company: { domain: string; name: string; brief: string; products: string[] };
   spend: { totalAcv: number; weightedCustomers: number };
+  buyers: IcpBuyer[];
   demographics: {
     titles: AffinityRow[];
     seniority: AffinityRow[];
     industries: AffinityRow[];
     sizes: AffinityRow[];
     locations: AffinityRow[];
+    functions: AffinityRow[];
+    age: AffinityRow[];
+    gender: AffinityRow[];
+    salary: AffinityRow[];
+    audienceTitles: AffinityRow[];
   };
   social: AffinityRow[];
   websites: AffinityRow[];
@@ -53,30 +85,36 @@ export type IcpReport = {
   keywords: AffinityRow[];
   apps: AffinityRow[];
   bioPhrases: AffinityRow[];
+  lookalikes: AffinityRow[];
+  press: AffinityRow[];
+  networks: AffinityRow[];
+  prompts: AffinityRow[];
+  tam: {
+    estimated_population: number | null;
+    year_over_year_growth_pct: number | null;
+    estimated_market_value: number | null;
+    currency: string | null;
+    rationale: string | null;
+  } | null;
+  sparkToro: { reportId: string; prompt: string; creditsRemaining: number | null } | null;
   segments: IcpSegment[];
   takeAction: string[];
   sources: string[];
   durationMs: number;
 };
 
+const ROLE_LOCAL =
+  /^(info|hello|hi|hey|contact|sales|marketing|support|admin|team|office|hr|jobs|press|media|billing|accounts|noreply|no-reply|webmaster|help)$/i;
+
 function normDomain(raw: string): string {
   return raw
     .trim()
     .toLowerCase()
+    .replace(/^mailto:/, "")
     .replace(/^https?:\/\//, "")
     .replace(/^www\./, "")
     .replace(/\/.*$/, "")
     .replace(/[^\w.-]/g, "");
-}
-
-function decode(s: string): string {
-  return s
-    .replace(/&/g, "&")
-    .replace(/&#39;/g, "'")
-    .replace(/"/g, '"')
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 function hostOf(url: string): string {
@@ -87,14 +125,29 @@ function hostOf(url: string): string {
   }
 }
 
-const BROWSER_UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15";
+function nameFromLocal(local: string): string | undefined {
+  if (!local || ROLE_LOCAL.test(local)) return undefined;
+  const parts = local
+    .split(/[._+\-]+/)
+    .filter((p) => p.length > 1 && !/^\d+$/.test(p) && !/^(mail|email|corp|inc)$/i.test(p));
+  if (!parts.length) return undefined;
+  return parts.map((p) => p[0]!.toUpperCase() + p.slice(1).toLowerCase()).join(" ");
+}
+
+function parseEmail(raw?: string): { email?: string; domain?: string; local?: string } {
+  const m = (raw ?? "").trim().toLowerCase().match(/^([a-z0-9._%+\-]+)@([a-z0-9.-]+\.[a-z]{2,})$/i);
+  if (!m) return {};
+  return { email: m[0], local: m[1], domain: normDomain(m[2]!) };
+}
 
 async function getJson<T>(url: string, timeout = 9000): Promise<T | null> {
   try {
     const res = await fetch(url, {
       signal: AbortSignal.timeout(timeout),
-      headers: { "User-Agent": BROWSER_UA, Accept: "application/json" },
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+        Accept: "application/json",
+      },
     });
     if (!res.ok) return null;
     return (await res.json()) as T;
@@ -107,75 +160,16 @@ async function getText(url: string, timeout = 9000): Promise<string> {
   try {
     const res = await fetch(url, {
       signal: AbortSignal.timeout(timeout),
-      headers: { "User-Agent": BROWSER_UA, Accept: "*/*" },
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+        Accept: "*/*",
+      },
     });
     if (!res.ok) return "";
     return res.text();
   } catch {
     return "";
   }
-}
-
-type SiteCard = {
-  domain: string;
-  name: string;
-  description: string;
-  social: Array<{ net: string; url: string }>;
-  products: string[];
-  tech: string[];
-  titles: string[];
-  locations: string[];
-  industry?: string;
-};
-
-async function crawlCard(domain: string): Promise<SiteCard> {
-  const card: SiteCard = { domain, name: domain.split(".")[0] ?? domain, description: "", social: [], products: [], tech: [], titles: [], locations: [] };
-  const home = await resilientFetch(`https://${domain}`, { timeoutMs: 8000, maxAttempts: 2, preferBot: true });
-  const html = home.ok ? home.body : "";
-  const title = decode(html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "");
-  const og = decode(html.match(/property="og:site_name"[^>]*content="([^"]+)"/i)?.[1] ?? html.match(/content="([^"]+)"[^>]*property="og:site_name"/i)?.[1] ?? "");
-  const desc = decode(
-    html.match(/property="og:description"[^>]*content="([^"]+)"/i)?.[1] ??
-      html.match(/name="description"[^>]*content="([^"]+)"/i)?.[1] ??
-      "",
-  );
-  if (og) card.name = og;
-  else if (title) card.name = title.replace(/\s*[|\-–:].*$/, "").slice(0, 80);
-  card.description = desc.slice(0, 280);
-  const socialRe = /https?:\/\/(?:www\.)?(linkedin|twitter|x|youtube|github|facebook|instagram)\.com\/[^\s"'<>]+/gi;
-  const seen = new Set<string>();
-  let m: RegExpExecArray | null;
-  while ((m = socialRe.exec(html))) {
-    const net = m[1]!.replace(/^x$/i, "twitter");
-    const url = m[0].replace(/[.,;)]+$/, "");
-    const key = net + url;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    card.social.push({ net, url });
-  }
-  for (const h of html.match(/<h[12][^>]*>([\s\S]*?)<\/h[12]>/gi) ?? []) {
-    const t = decode(h);
-    if (t.length > 4 && t.length < 60) card.products.push(t);
-  }
-  const loc = html.match(/([A-Z][a-z]+(?:\s[A-Z][a-z]+)*),\s*(?:[A-Z]{2}|[A-Z][a-z]+)(?:\s+\d{4,6})?/);
-  if (loc) card.locations.push(loc[0]);
-  try {
-    const stack = await detectTechStack(domain, `${title} ${desc}`);
-    card.tech = stack.technologies.slice(0, 18).map((t) => t.name);
-  } catch {
-    /* skip */
-  }
-  const jobsHtml = await getText(
-    `https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=${encodeURIComponent(card.name)}&start=0`,
-    10000,
-  );
-  for (const c of jobsHtml.split(/base-card/i).slice(1, 16)) {
-    const jt = decode((c.match(/base-search-card__title[^>]*>([\s\S]*?)</i)?.[1] ?? "").replace(/\s+/g, " "));
-    const loc2 = decode((c.match(/job-search-card__location[^>]*>([\s\S]*?)</i)?.[1] ?? "").replace(/\s+/g, " "));
-    if (jt) card.titles.push(jt);
-    if (loc2) card.locations.push(loc2);
-  }
-  return card;
 }
 
 function bag(): Map<string, { w: number; n: number; url?: string; evidence: string[]; source: string; kind: string }> {
@@ -190,6 +184,7 @@ function add(
 ) {
   const key = name.trim();
   if (!key || key.length < 2) return;
+  if (/^(home|about|blog|login|contact|privacy|terms)$/i.test(key)) return;
   const cur = m.get(key.toLowerCase()) ?? { w: 0, n: 0, url: meta.url, evidence: [], source: meta.source, kind: meta.kind };
   cur.w += weight;
   cur.n += 1;
@@ -205,15 +200,15 @@ function rank(
 ): AffinityRow[] {
   const rows = [...m.entries()].map(([k, v]) => {
     const pct = totalW > 0 ? Math.round((v.w / totalW) * 1000) / 10 : 0;
-    const affinity = Math.min(100, Math.round(pct * 1.4 + Math.min(30, v.n * 6)));
-    const display = k.includes(".") || k.startsWith("r/") ? k : k.replace(/\b\w/g, (c) => c.toUpperCase());
+    const affinity = Math.min(100, Math.round(pct * 1.4 + Math.min(30, v.n * 8)));
+    const display = k.includes(".") || k.startsWith("r/") || k.startsWith("@") ? k : k.replace(/\b\w/g, (c) => c.toUpperCase());
     return {
       name: display,
       url: v.url,
       kind: v.kind,
       pct,
       affinity,
-      evidence: v.evidence.slice(0, 3).join(" · ") || v.source,
+      evidence: [...new Set(v.evidence)].slice(0, 3).join(" · ") || v.source,
       source: v.source,
     };
   });
@@ -221,44 +216,38 @@ function rank(
 }
 
 const SENIORITY: Array<{ re: RegExp; label: string }> = [
-  { re: /\b(chief|ceo|cto|cfo|cmo|coo|ciso|founder|co-founder|president)\b/i, label: "C-level / founder" },
+  { re: /\b(chief|ceo|cto|cfo|cmo|coo|ciso|founder|co-founder|president|owner)\b/i, label: "C-level / founder" },
   { re: /\b(vp|vice president|head of|director)\b/i, label: "VP / Director" },
-  { re: /\b(manager|lead|principal|staff)\b/i, label: "Manager / Lead" },
+  { re: /\b(manager|lead|principal|staff|partner)\b/i, label: "Manager / Lead" },
+  { re: /\b(marketing|sales|growth|demand)\b/i, label: "GTM / Marketing" },
   { re: /\b(engineer|developer|analyst|specialist|consultant)\b/i, label: "IC / Practitioner" },
 ];
 
-async function itunesPodcasts(q: string): Promise<Array<{ name: string; url: string; artist: string }>> {
-  const j = await getJson<{ results?: Array<{ collectionName?: string; collectionViewUrl?: string; artistName?: string }> }>(
-    `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=podcast&limit=8`,
-  );
-  return (j?.results ?? []).map((r) => ({
-    name: r.collectionName ?? "",
-    url: r.collectionViewUrl ?? "",
-    artist: r.artistName ?? "",
-  })).filter((x) => x.name);
-}
-
-async function googleSuggest(q: string): Promise<string[]> {
-  const raw = await getText(`https://suggestqueries.google.com/complete/search?client=firefox&q=${encodeURIComponent(q)}`);
-  try {
-    const j = JSON.parse(raw) as [string, string[]];
-    return Array.isArray(j[1]) ? j[1] : [];
-  } catch {
-    return [];
+function seniorityOf(title: string | null, levels: string[]): string | null {
+  if (levels.includes("owner") || levels.includes("cxo") || levels.includes("partner")) return "C-level / founder";
+  if (levels.includes("vp") || levels.includes("director")) return "VP / Director";
+  if (title) {
+    const hit = SENIORITY.find((s) => s.re.test(title));
+    if (hit) return hit.label;
   }
+  if (levels.includes("manager") || levels.includes("senior")) return "Manager / Lead";
+  return title ? "IC / Practitioner" : null;
 }
 
-async function hnHits(q: string) {
-  const j = await getJson<{ hits?: Array<{ title?: string; url?: string; points?: number; author?: string }> }>(
-    `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(q)}&hitsPerPage=12`,
+async function itunesPodcasts(q: string): Promise<Array<{ name: string; url: string; artist: string }>> {
+  if (q.trim().length < 4) return [];
+  const j = await getJson<{ results?: Array<{ collectionName?: string; collectionViewUrl?: string; artistName?: string }> }>(
+    `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=podcast&limit=6`,
   );
-  return j?.hits ?? [];
+  return (j?.results ?? [])
+    .map((r) => ({ name: r.collectionName ?? "", url: r.collectionViewUrl ?? "", artist: r.artistName ?? "" }))
+    .filter((x) => x.name);
 }
 
-function extractReddit(urlsAndTitles: string[]): Array<{ name: string; url: string }> {
+function extractReddit(blobs: string[]): Array<{ name: string; url: string }> {
   const out: Array<{ name: string; url: string }> = [];
   const seen = new Set<string>();
-  for (const s of urlsAndTitles) {
+  for (const s of blobs) {
     const m = s.match(/reddit\.com\/r\/([A-Za-z0-9_]+)/i) || s.match(/\br\/([A-Za-z0-9_]{3,30})\b/);
     if (!m) continue;
     const name = `r/${m[1]}`;
@@ -269,51 +258,136 @@ function extractReddit(urlsAndTitles: string[]): Array<{ name: string; url: stri
   return out;
 }
 
-function extractYt(title: string, url: string): { name: string; url: string } | null {
-  const u = url || "";
-  if (!/youtube\.com|youtu\.be/i.test(u + title)) return null;
-  const name = title.replace(/\s*[-|].*(youtube|google).*$/i, "").slice(0, 90);
-  return name ? { name, url: u } : null;
+const INDUSTRY_REDDIT: Record<string, string[]> = {
+  education: ["r/edtech", "r/Teachers", "r/highereducation"],
+  software: ["r/SaaS", "r/startups", "r/entrepreneur"],
+  health: ["r/healthIT", "r/healthcare"],
+  finance: ["r/fintech", "r/smallbusiness"],
+  marketing: ["r/marketing", "r/Emailmarketing", "r/sales"],
+  real: ["r/realtors", "r/realestate"],
+  insurance: ["r/Insurance", "r/sales"],
+};
+
+function redditsFor(industry: string | null, role: string | null): string[] {
+  const blob = `${industry ?? ""} ${role ?? ""}`.toLowerCase();
+  const out: string[] = [];
+  for (const [k, subs] of Object.entries(INDUSTRY_REDDIT)) {
+    if (blob.includes(k)) out.push(...subs);
+  }
+  if (/\bmarketing|growth|demand\b/.test(blob)) out.push("r/Emailmarketing", "r/marketing");
+  return [...new Set(out)];
 }
+
+function defaultAcv(index: number, n: number): number {
+  /* first listed = highest ACV; last = most frequent / lower ticket */
+  return Math.max(1, Math.round(1000 / (index + 1)));
+}
+
+function tokensOf(...parts: Array<string | null | undefined>): string[] {
+  const STOP = /^(the|and|for|with|from|that|this|your|their|about|using|saas|tool|platform|company|inc|llc|ltd|email)$/i;
+  const out = new Set<string>();
+  for (const p of parts) {
+    for (const w of (p ?? "").match(/[A-Za-z][A-Za-z0-9+#-]{3,}/g) ?? []) {
+      if (!STOP.test(w)) out.add(w);
+    }
+  }
+  return [...out];
+}
+
+type EnrichedBuyer = {
+  in: IcpCustomerIn & { email?: string; domain: string; acv: number };
+  person: PersonFindData | null;
+  company: CompanyFindData | null;
+  roleHint: string | null;
+};
 
 export async function findIcp(input: IcpInput): Promise<IcpReport> {
   const t0 = Date.now();
   const domain = normDomain(input.website || "");
   if (!domain.includes(".")) throw new Error("website domain required");
-
-  const customers = (input.customers ?? [])
-    .map((c) => ({ ...c, domain: normDomain(c.domain || c.name || "") }))
-    .filter((c) => c.domain.includes("."));
-  const competitors = (input.competitors ?? []).map(normDomain).filter((d) => d.includes("."));
   const brief = (input.brief ?? "").trim();
 
-  const you = await crawlCard(domain);
-  const products = [...new Set([...(brief ? [brief.slice(0, 80)] : []), ...you.products.slice(0, 6)])];
-  const STOP = /^(that|with|from|your|their|about|using|which|while|these|those|company|teams|platform|cloud|spend|cuts)$/i;
-  const topicWords = [...new Set(
-    `${brief} ${you.description} ${you.name}`
-      .match(/[A-Za-z][A-Za-z0-9+#-]{3,}/g)
-      ?.filter((w) => !STOP.test(w)) ?? [],
-  )];
-  const q = (topicWords.slice(0, 3).join(" ") || you.name).slice(0, 40);
+  const parsed = (input.customers ?? [])
+    .map((c, i) => {
+      const fromEmail = parseEmail(c.email) ;
+      const fromName = parseEmail(c.name);
+      const email = fromEmail.email || fromName.email;
+      const d = normDomain(c.domain || fromEmail.domain || fromName.domain || "");
+      const acv = Number(c.acv);
+      return {
+        email,
+        name: c.name && !c.name.includes("@") ? c.name : nameFromLocal(fromEmail.local || fromName.local || "") ,
+        domain: d,
+        acv: Number.isFinite(acv) && acv > 0 ? acv : defaultAcv(i, input.customers?.length ?? 1),
+        roleHint: fromEmail.local && ROLE_LOCAL.test(fromEmail.local) ? fromEmail.local : null,
+      };
+    })
+    .filter((c) => c.domain.includes("."));
 
-  const weighted: Array<{ card: SiteCard; acv: number; role: "customer" | "competitor" | "you" }> = [
-    { card: you, acv: 0, role: "you" },
-  ];
-  const custAcv = customers.map((c) => Math.max(1, Number(c.acv) || 1));
-  const totalAcv = custAcv.reduce((s, n) => s + n, 0) || 1;
+  const competitors = (input.competitors ?? []).map(normDomain).filter((d) => d.includes("."));
+  const totalAcv = parsed.reduce((s, c) => s + c.acv, 0) || 1;
 
-  const [custCards, compCards] = await Promise.all([
-    Promise.all(customers.slice(0, 8).map(async (c, i) => ({ card: await crawlCard(c.domain), acv: custAcv[i] ?? 1, role: "customer" as const }))),
-    Promise.all(competitors.slice(0, 6).map(async (d) => ({ card: await crawlCard(d), acv: 0, role: "competitor" as const }))),
+  const { findPerson } = await import("./person-find");
+  const { findCompany } = await import("./company-find");
+
+  const [youCo, buyersRaw, compCos] = await Promise.all([
+    findCompany(domain).catch(() => null),
+    Promise.all(
+      parsed.slice(0, 8).map(async (c) => {
+        const [personRes, company] = await Promise.all([
+          c.email && !c.roleHint
+            ? findPerson({
+                email: c.email,
+                fullName: c.name,
+                domain: c.domain,
+                company: c.domain.split(".")[0],
+              }).catch(() => null)
+            : Promise.resolve(null),
+          findCompany(c.domain).catch(() => null),
+        ]);
+        let person = personRes?.data ?? null;
+        if (person && !person.job_title && c.name && !c.name.includes(" ")) {
+          try {
+            const { lookupPersonAtCompany } = await import("./linkedin-company");
+            const hits = await lookupPersonAtCompany({
+              domain: c.domain,
+              companyName: company?.data.displayName || c.domain.split(".")[0],
+              query: c.name,
+            });
+            const needle = c.name.toLowerCase();
+            const hit = hits.find(
+              (h) =>
+                h.firstName.toLowerCase() === needle ||
+                h.fullName.toLowerCase().startsWith(needle),
+            );
+            if (hit) {
+              person = {
+                ...person,
+                full_name: hit.fullName,
+                first_name: hit.firstName,
+                last_name: hit.lastName,
+                job_title: hit.title ?? person.job_title,
+                location_name: hit.location ?? person.location_name,
+                linkedin_url: hit.sourceUrl || person.linkedin_url,
+              };
+            }
+          } catch {
+            /* keep enrich as-is */
+          }
+        }
+        return { in: c, person, company: company?.data ?? null, roleHint: c.roleHint } satisfies EnrichedBuyer;
+      }),
+    ),
+    Promise.all(competitors.slice(0, 5).map((d) => findCompany(d).catch(() => null))),
   ]);
-  weighted.push(...custCards, ...compCards);
 
+  const sources = new Set<string>(["person-enrich", "company-enrich"]);
   const titles = bag();
   const seniority = bag();
   const industries = bag();
   const sizes = bag();
   const locations = bag();
+  const functions = bag();
   const social = bag();
   const websites = bag();
   const youtube = bag();
@@ -322,161 +396,295 @@ export async function findIcp(input: IcpInput): Promise<IcpReport> {
   const keywords = bag();
   const apps = bag();
   const bios = bag();
-  const sources = new Set<string>(["site-crawl", "linkedin-jobs", "tech-headers"]);
+  const lookalikes = bag();
 
-  for (const row of weighted) {
-    const w = row.role === "customer" ? row.acv : row.role === "you" ? totalAcv * 0.15 : totalAcv * 0.08;
-    for (const t of row.card.titles) {
-      const buyer =
-        /platform|devops|sre|finops|kubernetes|cloud|infra|architect|reliability|\bcto\b|vp |vice president|head of|director|product manager|engineering manager|staff engineer|principal|security|data platform/i.test(
-          t,
-        ) || topicWords.some((word) => word.length > 5 && t.toLowerCase().includes(word.toLowerCase()));
-      if (!buyer && row.role === "customer") continue;
-      add(titles, t, w, { source: "linkedin-jobs", kind: "title", evidence: `${row.card.name} hiring` });
-      const sen = SENIORITY.find((s) => s.re.test(t));
-      if (sen) add(seniority, sen.label, w, { source: "linkedin-jobs", kind: "seniority", evidence: t });
-      for (const phrase of t.split(/[|,/–-]/).map((x) => x.trim()).filter((x) => x.length > 3 && x.length < 40)) {
-        add(bios, phrase, w, { source: "job-title", kind: "bio", evidence: `${row.card.name}` });
+  const buyers: IcpBuyer[] = [];
+  const industryTokens: string[] = [];
+  const roleTokens: string[] = [];
+
+  for (const row of buyersRaw) {
+    const w = row.in.acv;
+    const p = row.person;
+    const co = row.company;
+    const tax = classifyTitle(p?.job_title || (row.roleHint ? row.roleHint : null));
+    const title =
+      p?.job_title ||
+      (row.roleHint ? `${row.roleHint[0]!.toUpperCase()}${row.roleHint.slice(1)} (role inbox)` : null);
+    const sen = seniorityOf(title, tax.levels);
+    const industry = co?.industry || co?.industryV2 || p?.job_company_industry || p?.industry || null;
+    const loc =
+      p?.location_name ||
+      [p?.location_locality, p?.location_region, p?.location_country].filter(Boolean).join(", ") ||
+      co?.location ||
+      [co?.geo?.city, co?.geo?.country].filter(Boolean).join(", ") ||
+      null;
+    const size = co?.metrics.employees || p?.job_company_size || null;
+    const name = (p?.full_name && p.full_name.trim()) || row.in.name || null;
+    const companyName = co?.displayName || co?.name || p?.job_company_name || row.in.domain.split(".")[0] || row.in.domain;
+
+    buyers.push({
+      email: row.in.email ?? null,
+      name: name ?? null,
+      title,
+      role: tax.role || row.roleHint || null,
+      seniority: sen,
+      company: companyName,
+      domain: row.in.domain,
+      industry,
+      size,
+      location: loc,
+      linkedin: p?.linkedin_url || co?.linkedin?.url || null,
+      twitter: p?.twitter_url || co?.twitter?.url || null,
+      acv: w,
+      sharePct: Math.round((w / totalAcv) * 1000) / 10,
+      sources: [...new Set([...(p ? ["person"] : []), ...(co ? ["company"] : [])])],
+    });
+
+    if (title) add(titles, title.replace(/ \(role inbox\)/i, ""), w, { source: "person-enrich", kind: "title", evidence: `${name || row.in.email} @ ${companyName}` });
+    if (sen) add(seniority, sen, w, { source: "person-enrich", kind: "seniority", evidence: title ?? "" });
+    if (tax.role) add(functions, tax.role.replace(/_/g, " "), w, { source: "person-enrich", kind: "function", evidence: title ?? row.roleHint ?? "" });
+    else if (row.roleHint) add(functions, row.roleHint, w, { source: "role-inbox", kind: "function", evidence: row.in.email ?? "" });
+    if (industry) add(industries, industry, w, { source: "company-enrich", kind: "industry", evidence: companyName });
+    if (size) add(sizes, size, w, { source: "company-enrich", kind: "size", evidence: companyName });
+    if (loc) add(locations, loc, w, { source: "person-enrich", kind: "location", evidence: name || companyName });
+
+    add(websites, row.in.domain, w, { url: `https://${row.in.domain}`, source: "paying-logo", kind: "site", evidence: companyName });
+    if (p?.linkedin_url)
+      add(social, `LinkedIn · ${name || p.linkedin_username || "buyer"}`, w, {
+        url: p.linkedin_url,
+        source: "person-enrich",
+        kind: "linkedin",
+        evidence: title ?? "",
+      });
+    if (p?.twitter_url)
+      add(social, `X · ${p.twitter_username || name}`, w, { url: p.twitter_url, source: "person-enrich", kind: "x", evidence: name ?? "" });
+    if (p?.github_url)
+      add(social, `GitHub · ${p.github_username || name}`, w, { url: p.github_url, source: "person-enrich", kind: "github", evidence: name ?? "" });
+    if (co?.linkedin.url)
+      add(social, `LinkedIn · ${companyName}`, w * 0.6, { url: co.linkedin.url, source: "company-enrich", kind: "linkedin", evidence: "company page" });
+    if (co?.twitter.url)
+      add(social, `X · ${co.twitter.handle || companyName}`, w * 0.5, { url: co.twitter.url, source: "company-enrich", kind: "x", evidence: companyName });
+    if (co?.crunchbase.url)
+      add(websites, hostOf(co.crunchbase.url) || "crunchbase.com", w * 0.4, { url: co.crunchbase.url, source: "company-enrich", kind: "site", evidence: companyName });
+    if (co?.youtube.url)
+      add(youtube, `${companyName} on YouTube`, w, { url: co.youtube.url, source: "company-enrich", kind: "youtube", evidence: companyName });
+
+    for (const t of co?.technologies ?? []) add(apps, t.name, w, { source: "company-enrich", kind: t.category || "app", evidence: companyName });
+    for (const tag of (co?.tags ?? []).slice(0, 8)) add(keywords, tag, w, { source: "company-enrich", kind: "tag", evidence: companyName });
+    if (industry) add(keywords, industry, w, { source: "company-enrich", kind: "industry", evidence: companyName });
+    if (title) add(keywords, title, w, { source: "person-enrich", kind: "title", evidence: name ?? "" });
+    for (const sk of (p?.skills ?? []).slice(0, 8)) add(keywords, sk, w * 0.4, { source: "person-enrich", kind: "skill", evidence: name ?? "" });
+    if (p?.headline) add(bios, p.headline.slice(0, 90), w, { source: "person-enrich", kind: "bio", evidence: name ?? "" });
+    if (p?.summary) {
+      for (const phrase of p.summary.split(/[.|\n]/).map((s) => s.trim()).filter((s) => s.length > 12 && s.length < 80).slice(0, 3)) {
+        add(bios, phrase, w * 0.5, { source: "person-enrich", kind: "bio", evidence: name ?? "" });
       }
     }
-    for (const loc of row.card.locations) add(locations, loc, w, { source: "jobs", kind: "location", evidence: row.card.name });
-    for (const s of row.card.social) {
-      add(social, `${s.net} · ${s.url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 60)}`, w, {
-        url: s.url,
-        source: "site",
-        kind: s.net,
-        evidence: row.card.domain,
+    if (title) add(bios, title, w, { source: "person-enrich", kind: "title", evidence: companyName });
+
+    for (const sim of (co?.similarCompanies ?? []).slice(0, 6)) {
+      if (!sim.name || /html|http|similar/i.test(sim.name)) continue;
+      add(lookalikes, sim.name, w * 0.5, {
+        url: sim.domain ? `https://${sim.domain}` : sim.linkedinUrl,
+        source: "company-enrich",
+        kind: "lookalike",
+        evidence: `${companyName}${sim.industry ? ` · ${sim.industry}` : ""}`,
       });
     }
-    for (const tech of row.card.tech) add(apps, tech, w, { source: "tech-stack", kind: "app", evidence: row.card.domain });
-    if (row.card.description) {
-      const industryGuess = row.card.description.split(/[.|]/)[0]?.slice(0, 80);
-      if (industryGuess) add(industries, industryGuess, w, { source: "about", kind: "industry", evidence: row.card.domain });
-    }
-    add(websites, row.card.domain, w, { url: `https://${row.card.domain}`, source: "customer-graph", kind: "site", evidence: row.card.name });
-    add(sizes, row.card.titles.length >= 10 ? "Hiring at scale (10+ open roles)" : row.card.titles.length >= 3 ? "Actively hiring" : "Small / unknown headcount signal", w, {
-      source: "jobs",
-      kind: "size",
-      evidence: `${row.card.titles.length} jobs`,
-    });
-  }
 
-  const podQ = `${topicWords[0] ?? you.name} cost`;
-  const [pods, pods2, suggest, suggest2, hn, ytRss, redditRss, g2Rss, pressRss] = await Promise.all([
-    itunesPodcasts(podQ),
-    itunesPodcasts(q),
-    googleSuggest(podQ),
-    googleSuggest(q),
-    hnHits(podQ),
-    getText(`https://news.google.com/rss/search?q=${encodeURIComponent(`site:youtube.com ${q}`)}&hl=en-US&gl=US&ceid=US:en`),
-    getText(`https://news.google.com/rss/search?q=${encodeURIComponent(`site:reddit.com ${q}`)}&hl=en-US&gl=US&ceid=US:en`),
-    getText(`https://news.google.com/rss/search?q=${encodeURIComponent(`site:g2.com OR site:capterra.com ${you.name}`)}&hl=en-US&gl=US&ceid=US:en`),
-    getText(`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-US&gl=US&ceid=US:en`),
-  ]);
-  sources.add("itunes");
-  sources.add("google-suggest");
-  sources.add("hacker-news");
-  sources.add("google-news");
-
-  const overlapW = totalAcv;
-  for (const p of [...pods, ...pods2]) {
-    add(podcasts, p.name, overlapW * 0.4, { url: p.url, source: "itunes", kind: "podcast", evidence: p.artist });
-  }
-  for (const [i, s] of [...suggest, ...suggest2].entries()) {
-    add(keywords, s, overlapW * (1 - i * 0.08), { source: "google-suggest", kind: "keyword", evidence: `autocomplete #${i + 1}` });
-  }
-  for (const h of hn) {
-    const host = h.url ? hostOf(h.url) : "news.ycombinator.com";
-    if (!/google\.|gstatic|doubleclick/.test(host)) {
-      add(websites, host, overlapW * 0.2, { url: h.url, source: "hacker-news", kind: "site", evidence: h.title ?? "" });
-    }
-    if (h.author) add(social, `HN · ${h.author}`, overlapW * 0.15, { url: `https://news.ycombinator.com/user?id=${h.author}`, source: "hacker-news", kind: "hn", evidence: h.title ?? "" });
-    add(keywords, (h.title ?? "").slice(0, 80), overlapW * 0.1, { source: "hacker-news", kind: "topic", evidence: `${h.points ?? 0} pts` });
-  }
-  for (const it of parseRss(ytRss, "youtube")) {
-    const yt = extractYt(it.title, it.url);
-    if (yt) add(youtube, yt.name, overlapW * 0.25, { url: yt.url, source: "youtube", kind: "youtube", evidence: "news index" });
-  }
-  for (const it of parseRss(redditRss, "reddit")) {
-    for (const r of extractReddit([it.url, it.title, it.snippet])) {
-      add(reddit, r.name, overlapW * 0.3, { url: r.url, source: "reddit", kind: "subreddit", evidence: it.title });
-    }
-  }
-  for (const it of parseRss(g2Rss, "g2")) {
-    const host = hostOf(it.url);
-    if (host && !/google\./.test(host)) {
-      add(websites, host, overlapW * 0.35, { url: it.url, source: "g2", kind: "review", evidence: it.title });
-    }
-  }
-  for (const it of parseRss(pressRss, "press")) {
-    const host = hostOf(it.url);
-    if (host && !/google\.|gstatic|doubleclick/.test(host)) {
-      add(websites, host, overlapW * 0.12, { url: it.url, source: "press", kind: "media", evidence: it.title });
+    if (industry) industryTokens.push(industry);
+    if (tax.role) roleTokens.push(tax.role.replace(/_/g, " "));
+    if (row.roleHint) roleTokens.push(row.roleHint);
+    for (const sub of redditsFor(industry, tax.role || row.roleHint || null)) {
+      add(reddit, sub, w * 0.7, { url: `https://www.reddit.com/${sub.replace(/^r\//, "r/")}`, source: "industry-map", kind: "subreddit", evidence: industry || title || "" });
     }
   }
 
-  const titleRows = rank(titles, totalAcv, 15);
-  const topTitles = titleRows.slice(0, 4).map((t) => t.name);
-  const topPods = rank(podcasts, overlapW, 6).map((p) => p.name);
-  const topSites = rank(websites, overlapW, 8).map((s) => s.name);
-  const topReddit = rank(reddit, overlapW, 5).map((s) => s.name);
-  const topKw = rank(keywords, overlapW, 6).map((s) => s.name);
+  for (const co of compCos) {
+    if (!co?.data) continue;
+    const w = totalAcv * 0.05;
+    add(websites, co.data.domain, w, { url: co.data.website, source: "competitor", kind: "site", evidence: co.data.displayName });
+    for (const t of co.data.technologies.slice(0, 8)) add(apps, t.name, w, { source: "competitor", kind: "app", evidence: co.data.displayName });
+  }
 
-  const paying = custCards.sort((a, b) => b.acv - a.acv);
-  const segments: IcpSegment[] = paying.slice(0, 3).map((c) => {
-    const share = Math.round((c.acv / totalAcv) * 1000) / 10;
-    const who = c.card.titles.slice(0, 4).join(" · ") || c.card.description.slice(0, 120) || c.card.name;
-    return {
-      name: `${c.card.name} cluster`,
-      shareOfRevenue: share,
-      who,
-      whereToShowUp: [...topSites.slice(0, 2), ...topPods.slice(0, 1), ...topReddit.slice(0, 1)].filter(Boolean),
-      evidence: [
-        `ACV weight ${share}%`,
-        c.card.tech.slice(0, 6).join(", ") || "tech unknown",
-        `${c.card.titles.length} live jobs`,
-      ],
-    };
+  const uniqueIndustries = [...new Set(industryTokens.map((s) => s.split(/[,/|]/)[0]!.trim()).filter((s) => s.length > 3))].slice(0, 4);
+  const uniqueRoles = [...new Set(roleTokens.filter((s) => s.length > 2))].slice(0, 4);
+  const podQueries = [
+    ...uniqueIndustries.map((i) => `${i} founder`),
+    ...uniqueRoles.map((r) => `${r} saas`),
+    uniqueIndustries[0] && uniqueRoles[0] ? `${uniqueIndustries[0]} ${uniqueRoles[0]}` : "",
+  ].filter(Boolean) as string[];
+
+  const { prompt: stPrompt, location: stLoc } = buildAudiencePrompt({
+    brief,
+    product: youCo?.data.headline || youCo?.data.description || undefined,
+    buyers,
   });
-  if (!segments.length) {
-    segments.push({
-      name: "Inferred from your site + category",
-      shareOfRevenue: 100,
-      who: topTitles.join(" · ") || "titles from category hiring",
-      whereToShowUp: [...topSites.slice(0, 3), ...topPods.slice(0, 1)],
-      evidence: ["No customer ACV provided — equal-weight category overlap only"],
+  let st = null as Awaited<ReturnType<typeof sparkToroFullReport>> | null;
+  try {
+    st = await sparkToroFullReport(stPrompt, stLoc, {
+      audienceKey: parsed.map((c) => c.email || c.domain).sort().join(","),
+      domains: parsed.map((c) => c.domain),
+      allowCreate: false,
     });
+    for (const s of st.sources) sources.add(s);
+  } catch (e) {
+    sources.add("sparktoro-failed");
   }
+
+  if (!st?.reportId) {
+    const [podLists, redditRss, ytRss] = await Promise.all([
+      Promise.all(podQueries.slice(0, 4).map((q) => itunesPodcasts(q))),
+      uniqueIndustries[0]
+        ? getText(`https://news.google.com/rss/search?q=${encodeURIComponent(`site:reddit.com ${uniqueIndustries[0]}`)}&hl=en-US&gl=US&ceid=US:en`)
+        : Promise.resolve(""),
+      uniqueIndustries[0]
+        ? getText(`https://news.google.com/rss/search?q=${encodeURIComponent(`site:youtube.com ${uniqueIndustries[0]} ${uniqueRoles[0] ?? ""}`)}&hl=en-US&gl=US&ceid=US:en`)
+        : Promise.resolve(""),
+    ]);
+    sources.add("itunes");
+    const keepTokens = tokensOf(...uniqueIndustries, ...uniqueRoles, brief).filter((t) => t.length > 4);
+    const podOk = (name: string) =>
+      keepTokens.some((t) => name.toLowerCase().includes(t.toLowerCase())) ||
+      uniqueIndustries.some((i) => name.toLowerCase().includes(i.split(/\s+/)[0]!.toLowerCase()));
+    for (const p of podLists.flat()) {
+      if (!podOk(p.name) && !podOk(p.artist)) continue;
+      add(podcasts, p.name, totalAcv * 0.25, { url: p.url, source: "itunes", kind: "podcast", evidence: p.artist });
+    }
+    for (const it of parseRss(redditRss, "reddit")) {
+      for (const r of extractReddit([it.url, it.title, it.snippet])) {
+        add(reddit, r.name, totalAcv * 0.2, { url: r.url, source: "reddit-index", kind: "subreddit", evidence: it.title });
+      }
+    }
+    for (const it of parseRss(ytRss, "youtube")) {
+      if (!/youtube\.com|youtu\.be/i.test(it.url)) continue;
+      const name = it.title.replace(/\s*[-|].*(youtube|google).*$/i, "").slice(0, 90);
+      if (!name || (!podOk(name) && keepTokens.length)) continue;
+      add(youtube, name, totalAcv * 0.15, { url: it.url, source: "youtube-index", kind: "youtube", evidence: uniqueIndustries[0] ?? "" });
+    }
+  }
+
+  const titleRows = rank(titles, totalAcv, 12);
+  const functionRows = rank(functions, totalAcv, 8);
+  const industryRows = rank(industries, totalAcv, 8);
+  const buyerSites = rank(websites, totalAcv, 8);
+  const buyerSocial = rank(social, totalAcv, 8);
+
+  const stSocial = st ? stToAffinity(st.social, "sparktoro", "social") : [];
+  const stSites = st ? stToAffinity(st.websites, "sparktoro", "site") : [];
+  const stYt = st ? stToAffinity(st.youtube, "sparktoro", "youtube") : rank(youtube, totalAcv, 12);
+  const stPods = st ? stToAffinity(st.podcasts, "sparktoro", "podcast") : rank(podcasts, totalAcv, 12);
+  const stReddit = st ? stToAffinity(st.reddit, "sparktoro", "subreddit") : rank(reddit, totalAcv, 12);
+  const stKw = st ? stToAffinity(st.keywords, "sparktoro", "keyword") : rank(keywords, totalAcv, 16);
+  const stApps = st ? stToAffinity(st.apps, "sparktoro", "app") : rank(apps, totalAcv, 14);
+  const stBios = st ? stToAffinity(st.bios, "sparktoro", "bio") : rank(bios, totalAcv, 16);
+  const stPress = st ? stToAffinity(st.press, "sparktoro", "press") : [];
+  const stNets = st ? stToAffinity(st.networks, "sparktoro", "network") : [];
+  const stPrompts = st ? stToAffinity(st.prompts, "sparktoro", "prompt") : [];
+
+  const socialRows = [...buyerSocial, ...stSocial].slice(0, 40);
+  const siteRows = [...stSites, ...buyerSites].slice(0, 40);
+  const podRows = stPods;
+  const redditRows = stReddit;
+
+  const segments: IcpSegment[] = buyers.map((b) => ({
+    name: [b.company, b.industry].filter(Boolean).join(" · ") || b.domain,
+    shareOfRevenue: b.sharePct,
+    who: [b.name, b.title, b.email].filter(Boolean).join(" · ") || b.domain,
+    whereToShowUp: [
+      b.linkedin ? "LinkedIn (this buyer)" : "",
+      ...socialRows.filter((s) => s.kind === "linkedin").slice(0, 1).map((s) => s.name),
+      ...redditRows.slice(0, 1).map((s) => s.name),
+      ...podRows.slice(0, 1).map((s) => s.name),
+    ].filter(Boolean),
+    evidence: [
+      `ACV weight ${b.sharePct}%`,
+      b.industry || "industry unknown",
+      b.size ? `${b.size} employees` : "",
+      b.location || "",
+    ].filter(Boolean),
+  }));
+
+  /* collapse identical industry+function */
+  const collapsed = new Map<string, IcpSegment>();
+  for (const s of segments) {
+    const key = `${s.name}`.toLowerCase();
+    const cur = collapsed.get(key);
+    if (!cur) collapsed.set(key, { ...s });
+    else {
+      cur.shareOfRevenue = Math.round((cur.shareOfRevenue + s.shareOfRevenue) * 10) / 10;
+      if (!cur.who.includes(s.who)) cur.who = `${cur.who} · ${s.who}`;
+    }
+  }
+  const segmentRows = [...collapsed.values()].sort((a, b) => b.shareOfRevenue - a.shareOfRevenue);
 
   const takeAction: string[] = [];
-  if (topPods[0]) takeAction.push(`Pitch or sponsor “${topPods[0]}” — iTunes ranks it for “${q}”.`);
-  if (topReddit[0]) takeAction.push(`Show up in ${topReddit[0]} with proof, not ads — it already indexes this category.`);
-  if (topKw[0]) takeAction.push(`SEO/content: Google autocomplete is pulling “${topKw[0]}” from your category.`);
-  if (topSites[0]) takeAction.push(`Digital PR: ${topSites[0]} already appears next to this audience in public overlap.`);
-  if (titleRows[0]) takeAction.push(`Outbound title: ${titleRows[0].name} (weighted by who actually pays, not a made-up persona).`);
-  if (paying[0]) takeAction.push(`Clone ${paying[0].card.name} (${Math.round((paying[0].acv / totalAcv) * 100)}% of named ACV) — lookalikes with the same stack/jobs.`);
+  if (titleRows[0])
+    takeAction.push(
+      `Outbound to “${titleRows[0].name}” — ${titleRows[0].pct}% of named ACV (people who paid).`,
+    );
+  if (functionRows[0]) takeAction.push(`Function to buy: ${functionRows.map((f) => `${f.name} (${f.pct}%)`).join(", ")}.`);
+  if (industryRows[0]) takeAction.push(`Industry: ${industryRows.map((i) => `${i.name} (${i.pct}%)`).slice(0, 3).join(" · ")}.`);
+  if (st?.tam?.estimated_population)
+    takeAction.push(
+      `TAM: ${st.tam.estimated_population.toLocaleString()} people · ${st.tam.currency} ${Math.round((st.tam.estimated_market_value ?? 0) / 1e6)}M market value (SparkToro).`,
+    );
+  if (stSites[0]) takeAction.push(`Sponsor / SEO: ${stSites.slice(0, 5).map((s) => s.name).join(", ")} — SparkToro websites this audience visits (affinity ${stSites[0].affinity}).`);
+  if (stSocial[0]) takeAction.push(`Creators they follow: ${stSocial.slice(0, 5).map((s) => s.name).join(", ")}.`);
+  if (stPods[0]) takeAction.push(`Podcasts they download: ${stPods.slice(0, 4).map((s) => s.name).join(", ")}.`);
+  if (stReddit[0]) takeAction.push(`Subreddits: ${stReddit.slice(0, 5).map((s) => s.name).join(", ")}.`);
+  if (stKw[0]) takeAction.push(`Search terms: ${stKw.slice(0, 5).map((s) => `${s.name} (aff ${s.affinity})`).join(", ")}.`);
+  if (stPress[0]) takeAction.push(`PR list: ${stPress.slice(0, 4).map((s) => s.name).join(", ")}.`);
+  const topLike = rank(lookalikes, totalAcv, 5);
+  if (topLike[0]) takeAction.push(`Clone paying logos: ${topLike.slice(0, 4).map((l) => l.name).join(", ")}.`);
+  if (buyers[0]?.email)
+    takeAction.push(`Highest-weight buyer: ${buyers[0].email}${buyers[0].title ? ` (${buyers[0].title})` : ""} at ${buyers[0].company}.`);
 
-  return {
-    company: { domain, name: you.name, brief: brief || you.description, products: products.slice(0, 8) },
-    spend: { totalAcv: customers.length ? totalAcv : 0, weightedCustomers: customers.length },
+  const you = youCo?.data;
+  const out = {
+    company: {
+      domain,
+      name: you?.displayName || you?.name || domain,
+      brief: brief || you?.headline || you?.description || "",
+      products: (you?.tags ?? []).slice(0, 8),
+    },
+    spend: { totalAcv: parsed.length ? totalAcv : 0, weightedCustomers: buyers.length },
+    buyers,
     demographics: {
       titles: titleRows,
       seniority: rank(seniority, totalAcv, 6),
-      industries: rank(industries, totalAcv, 8),
-      sizes: rank(sizes, totalAcv, 5),
-      locations: rank(locations, totalAcv, 8),
+      industries: industryRows.length ? industryRows : stToAffinity(st?.demographics.industry ?? [], "sparktoro", "industry"),
+      sizes: rank(sizes, totalAcv, 6).length ? rank(sizes, totalAcv, 6) : stToAffinity(st?.demographics.company_employee_count ?? [], "sparktoro", "size"),
+      locations: [
+        ...rank(locations, totalAcv, 8),
+        ...stToAffinity(st?.demographics.country ?? [], "sparktoro", "location"),
+        ...stToAffinity(st?.demographics.state ?? [], "sparktoro", "location"),
+      ].slice(0, 12),
+      functions: functionRows,
+      age: stToAffinity(st?.demographics.age ?? [], "sparktoro", "age"),
+      gender: stToAffinity(st?.demographics.gender ?? [], "sparktoro", "gender"),
+      salary: stToAffinity(st?.demographics.salary ?? [], "sparktoro", "salary"),
+      audienceTitles: stToAffinity(st?.demographics.title_role ?? [], "sparktoro", "title"),
     },
-    social: rank(social, totalAcv, 12),
-    websites: rank(websites, overlapW, 14),
-    youtube: rank(youtube, overlapW, 10),
-    podcasts: rank(podcasts, overlapW, 10),
-    reddit: rank(reddit, overlapW, 10),
-    keywords: rank(keywords, overlapW, 14),
-    apps: rank(apps, totalAcv, 14),
-    bioPhrases: rank(bios, totalAcv, 16),
-    segments,
+    social: socialRows,
+    websites: siteRows,
+    youtube: stYt,
+    podcasts: podRows,
+    reddit: redditRows,
+    keywords: stKw,
+    apps: stApps.length ? stApps : rank(apps, totalAcv, 14),
+    bioPhrases: stBios.length ? stBios : rank(bios, totalAcv, 16),
+    lookalikes: topLike,
+    press: stPress,
+    networks: stNets,
+    prompts: stPrompts,
+    tam: st?.tam ?? null,
+    sparkToro: st?.reportId ? { reportId: st.reportId, prompt: st.prompt, creditsRemaining: st.creditsRemaining } : null,
+    segments: segmentRows,
     takeAction,
     sources: [...sources],
     durationMs: Date.now() - t0,
   };
+  saveIcpReport(out);
+  return out;
 }

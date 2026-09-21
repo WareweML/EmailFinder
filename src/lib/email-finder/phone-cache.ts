@@ -49,3 +49,10 @@ export function cacheSet(key: string, row: Omit<Row, "at">) {
   db[key] = { ...row, at: Date.now() };
   save(db);
 }
+
+export function cacheDel(key: string) {
+  const db = load();
+  if (!(key in db)) return;
+  delete db[key];
+  save(db);
+}

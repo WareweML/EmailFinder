@@ -92,22 +92,17 @@ export const domainSearchFn = createServerFn({ method: "POST" })
   )
   .handler(async ({ data }) => {
     const { fastLinkedInDomainSearch } = await import("./linkedin-company");
-    const result = await fastLinkedInDomainSearch(data.domain);
-    if (data.titleFilter?.trim()) {
-      const q = data.titleFilter.trim().toLowerCase();
-      const emails = result.emails.filter((e) => {
-        const title = (e.title ?? "").toLowerCase();
-        const name = `${e.firstName ?? ""} ${e.lastName ?? ""}`.toLowerCase();
-        return title.includes(q) || name.includes(q);
-      });
-      const people = result.people.filter(
-        (p) =>
-          (p.title ?? "").toLowerCase().includes(q) ||
-          p.fullName.toLowerCase().includes(q),
-      );
+    const { parseRoleFilter, titleMatchesRoles } = await import("./role-filter");
+    const result = await fastLinkedInDomainSearch(data.domain, {
+      titleFilter: data.titleFilter,
+    });
+    const roles = parseRoleFilter(data.titleFilter);
+    if (roles.length) {
+      const emails = result.emails.filter((e) => titleMatchesRoles(e.title, roles));
+      const people = result.people.filter((p) => titleMatchesRoles(p.title, roles));
       return { ...result, emails, people, titleFilter: data.titleFilter };
     }
-    return result;
+    return { ...result, titleFilter: data.titleFilter ?? null };
   });
 
 export const verifyEmailFn = createServerFn({ method: "POST" })
@@ -335,7 +330,7 @@ export const suggestCompanyFn = createServerFn({ method: "POST" })
     return Promise.race([
       suggestCompanies(data.query),
       new Promise<Awaited<ReturnType<typeof suggestCompanies>>>((resolve) =>
-        setTimeout(() => resolve([]), 2800),
+        setTimeout(() => resolve([]), 6500),
       ),
     ]);
   });
@@ -541,7 +536,7 @@ export const findIcpFn = createServerFn({ method: "POST" })
     (data: {
       website: string;
       brief?: string;
-      customers?: Array<{ name?: string; domain: string; acv: number }>;
+      customers?: Array<{ email?: string; name?: string; domain?: string; acv?: number }>;
       competitors?: string[];
     }) => data,
   )
@@ -549,4 +544,9 @@ export const findIcpFn = createServerFn({ method: "POST" })
     const { findIcp } = await import("./icp-find");
     return findIcp(data);
   });
+
+export const loadLastIcpFn = createServerFn({ method: "GET" }).handler(async () => {
+  const { loadLastIcp, restorePaidSparkToroReport } = await import("./icp-store");
+  return loadLastIcp() ?? restorePaidSparkToroReport();
+});
 

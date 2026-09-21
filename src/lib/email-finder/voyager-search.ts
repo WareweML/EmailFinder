@@ -1,10 +1,11 @@
 /**
  * Discover: live people/companies from whatever filters the user typed.
- * No hardcoded query. Sales Nav only if a dedicated farm seat is on.
+ * LinkedIn data comes from ApiAlt when APIALT_KEY is set. Personal Sales Nav
+ * cookies are not sent in that mode.
  */
 
-import { readFileSync } from "node:fs";
-import { liGet } from "./linkedin-http";
+import { liGet, liSessionStatus, liCircuitOpen, loadLiSession, apialtConfigured } from "./linkedin-http";
+import { isDirectorySpam, isPlausibleName } from "./decodo-serp";
 
 export type DiscoverPerson = {
   name: string;
@@ -39,6 +40,7 @@ export type DiscoverResult<T> = {
   hits: T[];
   detail: string;
   ms: number;
+  session?: { salesNav: "ready" | "paused" | "missing"; reason?: string };
 };
 
 export type CompanyFilters = {
@@ -76,17 +78,8 @@ export type PeopleFilters = CompanyFilters & {
 };
 
 function loadSession(): { liAt: string; jsession: string } | null {
-  if (process.env.LI_USE_SESSION !== "1") return null;
-  const liAt = process.env.LI_AT;
-  const jsession = process.env.LI_JSESSIONID;
-  if (liAt && jsession) return { liAt, jsession };
-  try {
-    const j = JSON.parse(readFileSync("/workspace/data/li-session.json", "utf8"));
-    if (j.liAt && j.jsession) return j;
-  } catch {
-    /* none */
-  }
-  return null;
+  if (liCircuitOpen()) return null;
+  return loadLiSession();
 }
 
 function splitEmployer(title?: string): { title?: string; company?: string } {
@@ -391,6 +384,21 @@ export async function discoverCompanies(
   f: CompanyFilters,
 ): Promise<DiscoverResult<DiscoverCompany>> {
   const t0 = Date.now();
+  if (apialtConfigured()) {
+    const needsSn = Boolean(f.revenueBand || f.growthBand || f.sizeId || f.hiringOnly);
+    const { apialtAccountSearch, apialtCompanySearch } = await import("./apialt");
+    const q = [f.keywords, f.companyName, f.domain].filter(Boolean).join(" ");
+    const pack = needsSn
+      ? await apialtAccountSearch(f, Math.min(f.count ?? 25, 25))
+      : { hits: q ? await apialtCompanySearch(q, f.count ?? 10) : [], total: 0, detail: "apialt company-search" };
+    return {
+      total: Math.max(pack.total, pack.hits.length),
+      hits: pack.hits,
+      detail: pack.detail,
+      ms: Date.now() - t0,
+      session: liSessionStatus(),
+    };
+  }
   const kw = [f.keywords, f.companyName, f.domain].filter(Boolean).join(" ");
   const facets = [
     "resultType:List(COMPANIES)",
@@ -445,7 +453,7 @@ export async function discoverPeople(
   if (pinCompany && (f.companyId || f.companyName || f.domain)) {
     const id =
       f.companyId?.trim() ||
-      (await resolveCompanyId(f.companyName || f.domain));
+      (apialtConfigured() ? undefined : await resolveCompanyId(f.companyName || f.domain));
     if (id) {
       companyIds = [id];
       matchedCompanies = [
@@ -461,6 +469,10 @@ export async function discoverPeople(
   const byName = new Map<string, DiscoverPerson>();
   const seenSlug = new Set<string>();
   const add = (h: DiscoverPerson) => {
+    if (!isPlausibleName(h.name) || isDirectorySpam(`${h.name} ${h.title ?? ""} ${h.company ?? ""}`, h.url)) return;
+    const li = h.linkedinUrl || h.url || "";
+    if (!/linkedin\.com\/in\//i.test(li)) return;
+    if (/contactout|rocketreach|zoominfo|signalhire|apollo/i.test(`${h.company ?? ""} ${h.title ?? ""}`)) return;
     if (seenSlug.has(h.slug)) return;
     seenSlug.add(h.slug);
     const key = h.name
@@ -476,7 +488,7 @@ export async function discoverPeople(
       byName.set(key, h);
       return;
     }
-    const rank: Record<string, number> = { linkedin: 4, google: 3, bing: 3, theorg: 2 };
+    const rank: Record<string, number> = { apialt: 5, linkedin: 4, google: 3, bing: 3, theorg: 2 };
     if ((rank[h.source ?? ""] ?? 1) > (rank[prev.source ?? ""] ?? 1)) {
       byName.set(key, {
         ...h,
@@ -501,18 +513,117 @@ export async function discoverPeople(
   let googleN = 0;
   let extraN = 0;
 
+  const needsSalesNav = Boolean(f.revenueBand || f.growthBand || f.sizeId || f.hiringOnly);
+  const session = liSessionStatus();
+  const viaApialt = apialtConfigured();
+  const snOk = session.salesNav === "ready";
+  const pausedReason =
+    session.reason ||
+    "Sales Nav is paused. Cookies are not being sent. Log in from the pinned SOCKS IP and paste a fresh li_at / li_a / JSESSIONID.";
+
+  if (viaApialt) {
+    const { apialtLeadSearch } = await import("./apialt");
+    let navDetail = "";
+    let total = 0;
+    if (needsSalesNav || pinCompany || f.companyId) {
+      const sn = await apialtLeadSearch(f, companyIds, 25);
+      navDetail = sn.detail;
+      total = sn.total;
+      for (const h of sn.hits) {
+        const split = splitEmployer(h.title);
+        add({
+          name: h.name,
+          title: split.title || h.title,
+          location: h.location,
+          url: h.url,
+          slug: h.slug,
+          company: h.company || split.company,
+          linkedinUrl: asLinkedIn(h.url),
+          source: "apialt",
+        });
+      }
+    } else {
+      const qText = [q, f.title, f.firstName, f.lastName, f.companyName].filter(Boolean).join(" ");
+      if (!qText) {
+        return {
+          total: 0,
+          hits: [],
+          detail: "Add a title, name, company, or keyword. LinkedIn search now runs through ApiAlt — no personal cookies.",
+          ms: Date.now() - t0,
+          session,
+        };
+      }
+      const { apialtRun, peopleFromApialt } = await import("./apialt");
+      const run = await apialtRun("linkedin.profile-search", { q: qText, limit: 15 }, {
+        timeoutMs: 25_000,
+        ttlMs: 5 * 60_000,
+        retry: false,
+      });
+      const hits = run.ok ? peopleFromApialt(run.data) : [];
+      navDetail = run.ok
+        ? `apialt profile-search ${hits.length} · ${run.credits}cr`
+        : `apialt profile-search failed: ${run.error ?? "no data"}`;
+      total = hits.length;
+      for (const h of hits) add({ ...h, source: "apialt" });
+    }
+    const named = [...byName.values()];
+    const { departmentOf, isDecisionTitle } = await import("./linkedin-company");
+    for (const h of named) {
+      h.department = departmentOf(h.title);
+      h.seniority = isDecisionTitle(h.title) ? "decision" : "ic";
+    }
+    const { fillCompanyDomains } = await import("./linkedin-public");
+    const filled = await fillCompanyDomains(named, 12_000);
+    const kept = filled.filter((p) =>
+      matchesDiscoverFilters(p, f, {
+        personGeo,
+        hqGeo: geo,
+        industry: industryLabel,
+      }),
+    );
+    return {
+      total: Math.max(total, kept.length),
+      hits: kept,
+      detail: `apialt ${kept.length}` + (q ? ` · q="${q}"` : "") + (navDetail ? ` · ${navDetail}` : ""),
+      ms: Date.now() - t0,
+      session,
+    };
+  }
+
+  if (!snOk && needsSalesNav) {
+    return {
+      total: 0,
+      hits: [],
+      detail: pausedReason,
+      ms: Date.now() - t0,
+      session,
+    };
+  }
+
+  if (!snOk && !pinCompany && !q && !f.title) {
+    return {
+      total: 0,
+      hits: [],
+      detail: `${pausedReason} Add a job title or company to search public LinkedIn cards, or restore Sales Nav for revenue / size filters.`,
+      ms: Date.now() - t0,
+      session,
+    };
+  }
+
   const [sn, orgPack, gPack, extraPack] = await Promise.all([
     (async () => {
       try {
+        if (!snOk) return null;
         const { farmReady } = await import("./sn-farm");
-        if (!farmReady()) return null;
         const { salesNavLeadSearch } = await import("./sales-nav");
-        return await salesNavLeadSearch(f, companyIds, 2500);
+        const cap = farmReady() ? 2500 : 50;
+        return await salesNavLeadSearch(f, companyIds, cap);
       } catch {
         return null;
       }
     })(),
     (async () => {
+      if (!snOk) return [];
       try {
         const { theorgDiscover } = await import("./theorg-people");
         return await theorgDiscover({
@@ -538,6 +649,8 @@ export async function discoverPeople(
             : [{ name: f.companyName! }];
           return await xrayPeopleAtCompanies(names, geo);
         }
+        if (!snOk) return [];
+        if (!q && !f.title) return [];
         return await liveLinkedInByFilters({
           keywords: q,
           title: f.title,
@@ -549,6 +662,7 @@ export async function discoverPeople(
       }
     })(),
     (async () => {
+      if (!snOk) return [];
       try {
         const { extraPeople } = await import("./extra-people");
         return await extraPeople({
@@ -636,17 +750,24 @@ export async function discoverPeople(
       industry: industryLabel,
     }),
   );
+  let detail =
+    `live ${kept.length}` +
+    (q ? ` · q="${q}"` : "") +
+    (geo ? ` · ${geo}` : "") +
+    (industryLabel ? ` · ${industryLabel}` : "") +
+    (navDetail ? ` · ${navDetail}` : "") +
+    ` · theorg ${orgN} · linkedin-serp ${googleN} · extra ${extraN}`;
+  if (session.salesNav !== "ready") {
+    detail = `${session.reason ?? "Sales Nav is not live."} ${detail}`;
+  } else if (needsSalesNav && !sn?.hits.length) {
+    detail = "Revenue / size / growth filters need Sales Nav. " + detail;
+  }
   return {
     total: Math.max(total, kept.length),
     hits: kept,
-    detail:
-      `live ${kept.length}` +
-      (q ? ` · q="${q}"` : "") +
-      (geo ? ` · ${geo}` : "") +
-      (industryLabel ? ` · ${industryLabel}` : "") +
-      (navDetail ? ` · ${navDetail}` : "") +
-      ` · theorg ${orgN} · linkedin-serp ${googleN} · extra ${extraN}`,
+    detail,
     ms: Date.now() - t0,
+    session,
   };
 }
 

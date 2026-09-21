@@ -3,6 +3,9 @@
  * Decodo rotates residential/ISP exits per request — we never share one IP.
  */
 
+import { compact, companyNameFitsDomain, companyOnCard, distinctiveTokens, isCollisionBrand, legalForm, linkedinFitsDomain, personFitsEmployer, spacedBrand } from "./identity-lock";
+import { titleMatchesRoles } from "./role-filter";
+
 export interface LinkedInCompany {
   name: string;
   slug: string;
@@ -50,10 +53,6 @@ const LEGAL =
   /^(pvt|ltd|llc|inc|llp|plc|gmbh|sa|pty|co|corp|corporation|company|private|limited|the|and|of)$/i;
 
 const searchCache = new Map<string, LinkedInCompany[]>();
-
-function compact(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
 
 function hyphenSlug(phrase: string): string {
   return phrase
@@ -545,41 +544,51 @@ async function liveJobs(companyId: string): Promise<LiveJob[]> {
   return jobs.slice(0, 40);
 }
 
-async function serpLinkedInPeople(companyName: string): Promise<LinkedInPerson[]> {
+async function serpLinkedInPeople(opts: {
+  companyName: string;
+  domain: string;
+  companyId?: string;
+  legalName?: string;
+  roles?: string[];
+}): Promise<LinkedInPerson[]> {
+  const companyName = opts.companyName;
+  const domain = opts.domain;
   const brand = compact(companyName);
   if (brand.length < 2) return [];
   const qName = companyName.length <= 5 ? companyName.toUpperCase() : companyName;
-
-  const titles = LINKEDIN_FUNCTIONS.filter((f) => f !== "Department unknown");
-  const geos = [
-    "linkedin.com",
-    "au.linkedin.com",
-    "uk.linkedin.com",
-    "ca.linkedin.com",
-    "in.linkedin.com",
-    "fr.linkedin.com",
-    "ae.linkedin.com",
-    "sg.linkedin.com",
-  ];
-  const shards = [
-    ...geos.map((g) => `site:${g}/in "${qName}"`),
-    ...geos.flatMap((g) =>
-      titles.map((t) => `site:${g}/in "at ${qName}" ${t.split(" ")[0]}`),
-    ),
-  ];
+  const collision = (await import("./identity-lock")).isCollisionBrand(domain);
+  const { personFitsEmployer } = await import("./identity-lock");
+  const { titleMatchesRoles } = await import("./role-filter");
+  const host =
+    domain.endsWith(".au") ? "au.linkedin.com" :
+    domain.endsWith(".uk") ? "uk.linkedin.com" :
+    domain.endsWith(".in") ? "in.linkedin.com" :
+    "linkedin.com";
+  const { serpRoleShards } = await import("./role-filter");
+  const shards = opts.roles?.length
+    ? serpRoleShards(qName, domain, opts.roles)
+    : [
+        `site:linkedin.com/in "${qName}"`,
+        `site:linkedin.com/in "at ${qName}"`,
+        `site:${host}/in "${qName}"`,
+        `site:linkedin.com/in "${domain}"`,
+        `site:linkedin.com/in "${qName}" (Director OR Manager OR Engineer OR Founder OR Consultant OR Head)`,
+      ];
+  if (!opts.roles?.length && opts.legalName && compact(opts.legalName) !== compact(qName)) {
+    shards.push(`site:linkedin.com/in "${opts.legalName}"`);
+  }
 
   const { decodoShards, peopleFromOrganic } = await import("./decodo-serp");
   const okkQs = [
-    `site:au.linkedin.com/in "at ${qName}" Engineer`,
-    `site:au.linkedin.com/in "at ${qName}" Manager`,
-    `site:au.linkedin.com/in "at ${qName}" Director`,
+    `site:${host}/in "at ${qName}"`,
     `site:linkedin.com/in "${qName}"`,
   ];
   const voyagerP = import("./voyager-people")
     .then(async (m) => {
-      const ta = await typeahead(qName);
-      const companyId = ta[0]?.id;
-      return m.voyagerPeopleFanout(qName, companyId);
+      const companyId =
+        opts.companyId ||
+        (await typeahead(qName).then((ta) => ta[0]?.id));
+      return m.voyagerPeopleFanout(qName, companyId, opts.roles ?? []);
     })
     .catch(() => ({
       hits: [] as Array<{ name: string; title?: string; slug: string; url: string }>,
@@ -596,13 +605,39 @@ async function serpLinkedInPeople(companyName: string): Promise<LinkedInPerson[]
 
   const out: LinkedInPerson[] = [];
   const seen = new Set<string>();
-  const addHit = (row: {
-    name: string;
-    title?: string;
-    slug: string;
-    url: string;
-  }) => {
-    if (seen.has(row.slug) || !isPersonName(row.name)) return;
+  const addHit = (
+    row: {
+      name: string;
+      title?: string;
+      slug: string;
+      url: string;
+    },
+    trusted: boolean,
+  ) => {
+    if (!isPersonName(row.name)) return;
+    if (
+      !trusted &&
+      collision &&
+      !personFitsEmployer({
+        title: row.title ?? "",
+        blob: `${row.name} ${row.title ?? ""}`,
+        domain,
+        company: companyName,
+        legalName: opts.legalName || companyName,
+      })
+    )
+      return;
+    if (opts.roles?.length && row.title && !titleMatchesRoles(row.title, opts.roles)) return;
+    if (seen.has(row.slug)) {
+      const ex = out.find((p) => p.slug === row.slug);
+      if (ex && row.title && !ex.title) {
+        ex.title = row.title;
+        const d = decoratePerson(ex);
+        ex.department = d.department;
+        ex.seniority = d.seniority;
+      }
+      return;
+    }
     seen.add(row.slug);
     const bits = row.name.split(/\s+/);
     out.push(
@@ -616,15 +651,79 @@ async function serpLinkedInPeople(companyName: string): Promise<LinkedInPerson[]
       }),
     );
   };
-  for (const row of voyager.hits) addHit(row);
   for (const rows of pages) {
-    for (const row of peopleFromOrganic(rows, qName)) addHit(row);
+    for (const row of peopleFromOrganic(rows, qName, domain)) addHit(row, false);
   }
-  for (const row of okkHits) addHit(row);
+  for (const row of okkHits) addHit(row, false);
+  for (const row of voyager.hits) addHit(row, Boolean(opts.companyId));
   return out;
 }
 
-export async function discoverLinkedInForDomain(domain: string): Promise<{
+function doctorsFromHtml(html: string): LinkedInPerson[] {
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&[a-z#0-9]+;/gi, " ")
+    .replace(/\s+/g, " ");
+  const skip = /\b(soroush|zaghi|kerstein|won moon|robert kerstein)\b/i;
+  const counts = new Map<string, number>();
+  for (const m of text.matchAll(
+    /\b(?:Dr\.?|Doctor)\s+([A-Z][a-z]{2,}(?:\s+[A-Z][a-z.]{1,20}){1,3})/g,
+  )) {
+    const name = m[1]!.replace(/\s+/g, " ").trim();
+    if (skip.test(name) || !isPersonName(name)) continue;
+    if (/\b(Award|Institute|USA|London|Los Angeles|Practitioners?)\b/.test(name)) continue;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  const out: LinkedInPerson[] = [];
+  for (const [name, n] of counts) {
+    if (n < 2) continue;
+    const bits = name.split(/\s+/);
+    const slug = hyphenSlug(name);
+    out.push(
+      decoratePerson({
+        fullName: name,
+        firstName: bits[0]!,
+        lastName: bits.slice(1).join(" "),
+        title: "Doctor",
+        profileUrl: `https://www.linkedin.com/in/${slug}/`,
+        slug,
+      }),
+    );
+  }
+  return out.slice(0, 12);
+}
+
+async function orgFromTypeahead(domain: string, nameHint: string): Promise<LinkedInCompany | null> {
+  const brand = domain.split(".")[0] ?? domain;
+  const collision = isCollisionBrand(domain);
+  const queries = [...new Set([domain, nameHint, ...(collision ? [] : [spacedBrand(brand), brand])].filter((q) => q && q.length >= 3))];
+  for (const q of queries) {
+    const hits = await typeahead(q);
+    for (const h of hits) {
+      const slugs = [
+        ...slugsForName(h.displayName),
+        hyphenSlug(h.displayName),
+      ];
+      for (const slug of slugs.slice(0, 3)) {
+        const html = await getText(`${GUEST}${encodeURIComponent(slug)}`, 5000, "text/html");
+        if (!html || html.length < 2000) continue;
+        const page = parseGuestPage(html, slug, h.id);
+        if (!page) continue;
+        if (linkedinFitsDomain({ website: page.website, name: page.name, domain })) {
+          return { ...page, companyId: h.id };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+export async function discoverLinkedInForDomain(
+  domain: string,
+  opts: { roles?: string[] } = {},
+): Promise<{
   company: LinkedInCompany | null;
   people: LinkedInPerson[];
   jobs: LiveJob[];
@@ -634,6 +733,17 @@ export async function discoverLinkedInForDomain(domain: string): Promise<{
   const brand = domain.split(".")[0] ?? domain;
   const tld = domain.split(".").slice(1).join(".");
   const tried = new Set<string>();
+  const siteHtml = await getText(`https://${domain}/`, 8000, "text/html");
+  const siteName =
+    siteHtml
+      ?.match(/property=["']og:site_name["'][^>]+content=["']([^"']+)/i)?.[1]
+      ?.trim() ||
+    siteHtml
+      ?.match(/<title[^>]*>([^<]+)/i)?.[1]
+      ?.split(/[|\-–—]/)[0]
+      ?.trim() ||
+    spacedBrand(brand);
+  const sitePeople = siteHtml ? doctorsFromHtml(siteHtml) : [];
 
   const trySlug = async (
     slug: string,
@@ -646,13 +756,16 @@ export async function discoverLinkedInForDomain(domain: string): Promise<{
       "text/html",
     );
     if (!html || html.length < 2000) return null;
-    const people = peopleFromGuestHtml(html);
     const page = parseGuestPage(html, slug);
+    if (page && !linkedinFitsDomain({ website: page.website, name: page.name, domain })) {
+      return null;
+    }
+    const people = peopleFromGuestHtml(html);
     if (!page && people.length === 0) return null;
     return {
       company:
         page ?? {
-          name: brand,
+          name: companyNameFitsDomain(siteName, domain) ? siteName : spacedBrand(brand),
           slug,
           linkedinUrl: `https://www.linkedin.com/company/${slug}/`,
           website: domain,
@@ -661,19 +774,35 @@ export async function discoverLinkedInForDomain(domain: string): Promise<{
     };
   };
 
-  const qName = brand.length <= 5 ? brand.toUpperCase() : brand;
-  const ta0 = await typeahead(qName);
-  const companyId = ta0[0]?.id;
+  const locked = await orgFromTypeahead(domain, siteName);
+  const distinctive = distinctiveTokens(siteName, domain).length > 0;
+  const qName = distinctive
+    ? siteName
+    : companyNameFitsDomain(siteName, domain)
+      ? siteName
+      : spacedBrand(brand).length > 3
+        ? spacedBrand(brand)
+        : brand.length <= 5
+          ? brand.toUpperCase()
+          : brand;
+  const companyId = locked?.companyId;
   const { voyagerCompany } = await import("./voyager-people");
   const hunterTok = import("./hunter-trial").then((m) =>
     m.solveTurnstile("https://hunter.io/email-finder"),
   );
   const [direct, serp, org, jobs0, theorg, sn] = await Promise.all([
     (async () => {
+      if (locked) return { company: locked, people: [] as LinkedInPerson[] };
       const preferred = tld && tld.length <= 4 ? `${brand}-${tld}` : brand;
       return (await trySlug(preferred)) ?? (await trySlug(brand));
     })(),
-    serpLinkedInPeople(qName),
+    serpLinkedInPeople({
+      companyName: qName,
+      domain,
+      companyId,
+      legalName: siteName,
+      roles: opts.roles,
+    }),
     companyId ? voyagerCompany(companyId).catch(() => null) : null,
     companyId ? liveJobs(companyId) : Promise.resolve([] as LiveJob[]),
     import("./theorg-people")
@@ -682,12 +811,19 @@ export async function discoverLinkedInForDomain(domain: string): Promise<{
     companyId
       ? import("./sales-nav")
           .then((m) =>
-            m.salesNavLeadSearch({ keywords: "" }, [companyId], 2500),
+            m.salesNavLeadSearch(
+              { keywords: opts.roles?.length ? opts.roles.join(" ") : "" },
+              [companyId],
+              opts.roles?.length ? 100 : 2500,
+            ),
           )
           .catch(() => ({ hits: [] as Array<{ name: string; title?: string; url?: string; slug?: string }> }))
       : Promise.resolve({ hits: [] as Array<{ name: string; title?: string; url?: string; slug?: string }> }),
   ]);
-  let company: LinkedInCompany | null = direct?.company ?? null;
+  let company: LinkedInCompany | null = locked ?? direct?.company ?? null;
+  if (company && !linkedinFitsDomain({ website: company.website, name: company.name, domain })) {
+    company = null;
+  }
   let people = direct?.people ?? [];
 
   if (!people.length) {
@@ -713,8 +849,27 @@ export async function discoverLinkedInForDomain(domain: string): Promise<{
 
   const seen = new Set(people.map((p) => p.slug));
   const seenName = new Set(people.map((p) => personKey(p)));
-  const addNamed = (p: LinkedInPerson) => {
+  const addNamed = (p: LinkedInPerson, trusted = false) => {
     const row = decoratePerson(p);
+    if (
+      !trusted &&
+      isCollisionBrand(domain) &&
+      !personFitsEmployer({
+        title: row.title ?? "",
+        blob: `${row.fullName} ${row.title ?? ""}`,
+        domain,
+        company: qName,
+        legalName: siteName,
+        hq: company?.hq,
+      })
+    )
+      return;
+    if (
+      opts.roles?.length &&
+      row.title &&
+      !titleMatchesRoles(row.title, opts.roles)
+    )
+      return;
     const nk = personKey(row);
     if (seen.has(row.slug) || seenName.has(nk)) {
       const ex = people.find((x) => x.slug === row.slug || personKey(x) === nk);
@@ -730,6 +885,7 @@ export async function discoverLinkedInForDomain(domain: string): Promise<{
     people.push(row);
   };
   for (const p of serp) addNamed(p);
+  for (const p of sitePeople) addNamed(p, true);
   for (const h of theorg.hits) {
     if (!isPersonName(cleanPersonName(h.name))) continue;
     const bits = cleanPersonName(h.name).split(/\s+/);
@@ -758,7 +914,7 @@ export async function discoverLinkedInForDomain(domain: string): Promise<{
       location: "location" in h ? String(h.location || "") : undefined,
       profileUrl: ("url" in h && String(h.url)) || `https://www.linkedin.com/in/${slug}/`,
       slug: String(slug),
-    });
+    }, Boolean(companyId));
   }
 
   people.sort((a, b) => {
@@ -768,25 +924,74 @@ export async function discoverLinkedInForDomain(domain: string): Promise<{
     return a.fullName.localeCompare(b.fullName);
   });
 
-  const displayName = (company?.name ?? "").replace(/\([^)]*\)/g, "").trim();
+  const displayName = (distinctive ? siteName : company?.name ?? qName).replace(/\([^)]*\)/g, "").trim();
   if (
     displayName &&
+    !isCollisionBrand(domain) &&
+    companyNameFitsDomain(displayName, domain) &&
     compact(displayName) !== compact(qName) &&
     people.length < 80
   ) {
-    const extra = await serpLinkedInPeople(displayName);
-    extra.forEach(addNamed);
+    const extra = await serpLinkedInPeople({
+      companyName: displayName,
+      domain,
+      companyId,
+      legalName: siteName,
+      roles: opts.roles,
+    });
+    extra.forEach((p) => addNamed(p));
+  }
+  if (company && distinctive) {
+    const missing = distinctiveTokens(siteName, domain).some(
+      (t) => !company!.name.toLowerCase().includes(t.toLowerCase()),
+    );
+    if (missing || companyNameFitsDomain(company.name, domain) === false) {
+      company = { ...company, name: siteName };
+    }
   }
 
-  const untitled = people.filter((p) => !p.title && p.profileUrl).slice(0, 8);
+  const untitled = people.filter((p) => !p.title && p.fullName.split(/\s+/).length >= 2).slice(0, 12);
   if (untitled.length) {
+    try {
+      const { decodoSearch, peopleFromOrganic } = await import("./decodo-serp");
+      const { mapPool } = await import("./http");
+      await mapPool(untitled, 4, async (p) => {
+        const name = p.fullName.replace(/"/g, "");
+        const rows = (
+          await Promise.all([
+            decodoSearch(`site:linkedin.com/in "${name}" "${qName}"`),
+            decodoSearch(`site:linkedin.com/in "${name}" "${domain}"`),
+          ])
+        ).flat();
+        const hits = peopleFromOrganic(rows, qName, domain);
+        const key = compact(p.fullName);
+        const hit =
+          hits.find((h) => compact(h.name) === key && h.title) ||
+          hits.find((h) => h.title) ||
+          hits[0];
+        if (!hit) return;
+        if (hit.title) p.title = hit.title.replace(/\s+-\s+LinkedIn$/i, "").trim();
+        if (hit.url) p.profileUrl = hit.url;
+        if (hit.slug) p.slug = hit.slug;
+        const d = decoratePerson(p);
+        p.department = d.department;
+        p.seniority = d.seniority;
+      });
+    } catch {
+      /* SERP titles optional */
+    }
+  }
+  const still = people.filter((p) => !p.title && p.profileUrl).slice(0, 8);
+  if (still.length) {
     const { enrichLinkedInProfile } = await import("./linkedin-public");
     await Promise.all(
-      untitled.map(async (p) => {
+      still.map(async (p) => {
         try {
           const prof = await enrichLinkedInProfile(p.profileUrl);
-          if (!prof) return;
-          if (prof.title) p.title = prof.title;
+          if (!prof?.title) return;
+          if (isCollisionBrand(domain) && prof.company && !companyOnCard(prof.company, qName, domain))
+            return;
+          p.title = prof.title;
           if (prof.location) p.location = prof.location;
           const d = decoratePerson(p);
           p.department = d.department;
@@ -798,6 +1003,32 @@ export async function discoverLinkedInForDomain(domain: string): Promise<{
     );
   }
 
+  if (isCollisionBrand(domain)) {
+    const selfForm = legalForm(siteName);
+    people = people.filter((p) => {
+      const t = p.title ?? "";
+      const form = legalForm(t);
+      if (selfForm && form && selfForm !== form) return false;
+      if (
+        /\bat\s+/i.test(t) &&
+        !personFitsEmployer({
+          title: t,
+          blob: `${p.fullName} ${t} ${p.location ?? ""}`,
+          domain,
+          company: qName,
+          legalName: siteName,
+          hq: company?.hq,
+        })
+      )
+        return false;
+      return true;
+    });
+  }
+
+  if (opts.roles?.length) {
+    people = people.filter((p) => titleMatchesRoles(p.title, opts.roles ?? []));
+  }
+
   people.sort((a, b) => {
     const sa = a.seniority === "decision" ? 1 : 0;
     const sb = b.seniority === "decision" ? 1 : 0;
@@ -805,12 +1036,12 @@ export async function discoverLinkedInForDomain(domain: string): Promise<{
     return a.fullName.localeCompare(b.fullName);
   });
 
-  if (org) {
+  if (org && linkedinFitsDomain({ website: org.website ?? company?.website, name: org.name || company?.name, domain })) {
     company = {
       name: org.name || company?.name || brand,
       slug: org.universalName || company?.slug || hyphenSlug(brand),
       linkedinUrl: `https://www.linkedin.com/company/${org.universalName || company?.slug || brand}/`,
-      website: company?.website ?? null,
+      website: company?.website ?? org.website ?? domain,
       industry: org.industry || company?.industry,
       hq: org.hq || company?.hq,
       type: company?.type,
@@ -870,12 +1101,15 @@ export async function discoverLinkedInForDomain(domain: string): Promise<{
     jobs,
     related: theorg.related ?? [],
     detail: company
-      ? `${company.name}${company.size ? ` · ${company.size}` : ""} · ${people.length} live names (${titled} titled) · TheOrg ${theorg.hits.length}/${theorg.positions || "?"} · ${jobs.length} open roles · ${locN} cities / ${deptN} functions`
+      ? `${company.name}${company.size ? ` · ${company.size}` : ""} · ${people.length} live names (${titled} titled)${opts.roles?.length ? ` · roles ${opts.roles.join(", ")}` : ""} · TheOrg ${theorg.hits.length}/${theorg.positions || "?"} · ${jobs.length} open roles · ${locN} cities / ${deptN} functions`
       : `Decodo SERP · ${people.length} named`,
   };
 }
 
-export async function fastLinkedInDomainSearch(domainInput: string) {
+export async function fastLinkedInDomainSearch(
+  domainInput: string,
+  opts: { titleFilter?: string } = {},
+) {
   const domain = domainInput
     .trim()
     .toLowerCase()
@@ -883,8 +1117,10 @@ export async function fastLinkedInDomainSearch(domainInput: string) {
     .replace(/^www\./, "")
     .split("/")[0]!;
   const t0 = Date.now();
+  const { parseRoleFilter } = await import("./role-filter");
+  const roles = parseRoleFilter(opts.titleFilter);
   const [li, tech, profile, companyFind] = await Promise.all([
-    discoverLinkedInForDomain(domain),
+    discoverLinkedInForDomain(domain, { roles }),
     import("./tech-stack").then((m) =>
       m.detectTechStack(domain).catch(() => ({
         technologies: [] as Array<{ name: string; category: string }>,
@@ -1064,6 +1300,57 @@ export async function lookupPersonAtCompany(opts: {
   if (q.length < 3) return [];
   const domain = opts.domain.replace(/^www\./, "").toLowerCase();
   const brand = cleanCompanyLabel(opts.companyName, domain);
+  const { apialtEnabled, apialtLookupPerson } = await import("./apialt");
+  if (apialtEnabled()) {
+    try {
+      const { isPlausibleName } = await import("./decodo-serp");
+      const { cleanRoleTitle } = await import("./linkedin-public");
+      const hits = await apialtLookupPerson(q, brand);
+      const tokens = q.toLowerCase().split(/\s+/).filter((t) => t.length > 1);
+      const out: Array<{
+        firstName: string;
+        lastName: string;
+        fullName: string;
+        title?: string;
+        location?: string;
+        department?: string;
+        seniority?: "decision" | "ic";
+        email?: string;
+        sourceUrl?: string;
+      }> = [];
+      const seen = new Set<string>();
+      for (const h of hits) {
+        if (!isPlausibleName(h.name)) continue;
+        const lower = h.name.toLowerCase();
+        if (tokens.some((t) => !lower.includes(t)) && tokens.length > 1) continue;
+        if (tokens.length === 1 && !lower.includes(tokens[0]!)) continue;
+        if (seen.has(h.slug.toLowerCase())) continue;
+        seen.add(h.slug.toLowerCase());
+        const bits = h.name.split(/\s+/);
+        const p = decoratePerson({
+          fullName: h.name,
+          firstName: bits[0]!,
+          lastName: bits.slice(1).join(" "),
+          title: cleanRoleTitle(h.title, brand),
+          profileUrl: `https://www.linkedin.com/in/${h.slug}/`,
+          slug: h.slug,
+        });
+        out.push({
+          firstName: p.firstName,
+          lastName: p.lastName,
+          fullName: p.fullName,
+          title: p.title,
+          location: h.location || p.location,
+          department: p.department,
+          seniority: p.seniority,
+          sourceUrl: `https://www.linkedin.com/in/${h.slug}/`,
+        });
+      }
+      if (out.length) return out;
+    } catch {
+      /* fall through to public SERP — never invent */
+    }
+  }
   const { decodoSearch, peopleFromOrganic, isPlausibleName } = await import("./decodo-serp");
   const { profileSlugFromUrl, identityLocked } = await import("./identity-lock");
   const queries = [

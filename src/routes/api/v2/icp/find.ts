@@ -7,7 +7,7 @@ export const Route = createFileRoute("/api/v2/icp/find")({
         const body = (await request.json().catch(() => ({}))) as {
           website?: string;
           brief?: string;
-          customers?: Array<{ name?: string; domain: string; acv: number }>;
+          customers?: Array<{ email?: string; name?: string; domain?: string; acv?: number }>;
           competitors?: string[];
         };
         if (!body.website) return Response.json({ error: "website required" }, { status: 400 });

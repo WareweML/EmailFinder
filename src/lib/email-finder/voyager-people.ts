@@ -3,6 +3,7 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
+import { loadLiSession } from "./linkedin-http";
 
 const SESSION_FILE = "/workspace/data/li-session.json";
 
@@ -80,7 +81,7 @@ export type VoyagerCompany = {
 export async function voyagerCompany(
   companyId: string,
 ): Promise<VoyagerCompany | null> {
-  const sess = loadSession();
+  const sess = loadLiSession();
   if (!sess) return null;
   const { liGet } = await import("./linkedin-http");
   const res = await liGet(
@@ -120,7 +121,7 @@ export async function voyagerPeopleSearch(
   keywords: string,
   opts?: { count?: number; start?: number; companyId?: string },
 ): Promise<{ hits: VoyagerHit[]; total: number; detail: string }> {
-  const sess = loadSession();
+  const sess = loadLiSession();
   if (!sess) return { hits: [], total: 0, detail: "no li_at" };
   const count = Math.min(opts?.count ?? 10, 25);
   const start = opts?.start ?? 0;
@@ -199,15 +200,24 @@ export const LINKEDIN_FUNCTIONS = [
 export async function voyagerPeopleFanout(
   companyName: string,
   companyId?: string,
+  roles: string[] = [],
 ): Promise<{ hits: VoyagerHit[]; total: number; detail: string }> {
-  const jobs: Array<{ kw: string; start: number }> = [
-    { kw: companyName, start: 0 },
-    { kw: companyName, start: 10 },
-    { kw: companyName, start: 20 },
-    { kw: companyName, start: 30 },
-    { kw: companyName, start: 40 },
-    ...LINKEDIN_FUNCTIONS.map((fn) => ({ kw: `${companyName} ${fn}`, start: 0 })),
-  ];
+  const { roleNeedles } = roles.length
+    ? await import("./role-filter")
+    : { roleNeedles: () => [] as string[] };
+  const jobs: Array<{ kw: string; start: number }> = roles.length
+    ? roleNeedles(roles).slice(0, 8).flatMap((r) => [
+        { kw: `${companyName} ${r}`, start: 0 },
+        { kw: `${companyName} ${r}`, start: 10 },
+      ])
+    : [
+        { kw: companyName, start: 0 },
+        { kw: companyName, start: 10 },
+        { kw: companyName, start: 20 },
+        { kw: companyName, start: 30 },
+        { kw: companyName, start: 40 },
+        ...LINKEDIN_FUNCTIONS.map((fn) => ({ kw: `${companyName} ${fn}`, start: 0 })),
+      ];
   const seen = new Set<string>();
   const hits: VoyagerHit[] = [];
   let total = 0;

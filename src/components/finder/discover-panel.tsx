@@ -1,4 +1,4 @@
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { Building2, Download, Loader2, RotateCcw, Search, User } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,12 @@ import {
   enrichPeopleFn,
 } from "@/lib/email-finder/server";
 import { LINKEDIN_FUNCTIONS } from "@/lib/email-finder/linkedin-company";
+import {
+  clearIcpDiscoverAutoSearch,
+  ICP_DISCOVER_EVENT,
+  readIcpDiscoverQuery,
+} from "@/lib/email-finder/icp-discover-bridge";
+import type { DiscoverFilterState, IcpDiscoverQuery } from "@/lib/email-finder/icp-to-discover";
 import { cn } from "@/lib/utils";
 
 type Tab = "people" | "companies";
@@ -56,6 +62,7 @@ export function DiscoverPanel() {
   const [revenueBand, setRevenueBand] = useState("");
   const [growthBand, setGrowthBand] = useState("");
   const [hiringOnly, setHiringOnly] = useState(false);
+  const [icpMeta, setIcpMeta] = useState<{ source: string; rationale: Record<string, string> } | null>(null);
 
   const [people, setPeople] = useState<
     Array<{
@@ -114,6 +121,55 @@ export function DiscoverPanel() {
     hiringOnly,
   };
 
+  function applyFilters(f: DiscoverFilterState) {
+    setKeywords(f.keywords);
+    setFirstName(f.firstName);
+    setLastName(f.lastName);
+    setTitle(f.title);
+    setPastTitle(f.pastTitle);
+    setSkills(f.skills);
+    setSchool(f.school);
+    setLanguage(f.language);
+    setYearsExp(f.yearsExp);
+    setTenure(f.tenure);
+    setCompanyName(f.companyName);
+    setCompanyId(f.companyId);
+    setPastCompanyName(f.pastCompanyName);
+    setPastCompanyId(f.pastCompanyId);
+    setCompanyKeywords(f.companyKeywords);
+    setDomain(f.domain);
+    setGeoId(f.geoId);
+    setHqGeoId(f.hqGeoId);
+    setIndustryId(f.industryId);
+    setSizeId(f.sizeId);
+    setCompanyType(f.companyType);
+    setRevenueBand(f.revenueBand);
+    setGrowthBand(f.growthBand);
+    setHiringOnly(f.hiringOnly);
+  }
+
+  function ingestQuery(q: IcpDiscoverQuery, runSearch: boolean) {
+    applyFilters(q.filters);
+    setTab(q.kind);
+    setIcpMeta({ source: q.source, rationale: q.rationale });
+    if (runSearch && q.autoSearch) {
+      searchWith(q.kind, q.filters);
+      clearIcpDiscoverAutoSearch();
+    }
+  }
+
+  useEffect(() => {
+    const q = readIcpDiscoverQuery();
+    if (q) ingestQuery(q, Boolean(q.autoSearch));
+    const on = (e: Event) => {
+      const next = (e as CustomEvent<IcpDiscoverQuery>).detail || readIcpDiscoverQuery();
+      if (next) ingestQuery(next, Boolean(next.autoSearch));
+    };
+    window.addEventListener(ICP_DISCOVER_EVENT, on);
+    return () => window.removeEventListener(ICP_DISCOVER_EVENT, on);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function reset() {
     setKeywords("");
     setFirstName("");
@@ -143,6 +199,39 @@ export function DiscoverPanel() {
     setPeople([]);
     setCompanies([]);
     setDetail("");
+    setIcpMeta(null);
+  }
+
+  function searchWith(kind: Tab, f: typeof payload) {
+    start(async () => {
+      try {
+        if (kind === "people") {
+          const r = await discoverPeopleFn({ data: { ...f, pages: 2 } });
+          setPeople(r.hits);
+          setCompanies([]);
+          setTotal(r.total);
+          setMs(r.ms);
+          setDetail(r.detail);
+          toast[r.hits.length ? "success" : "error"](
+            r.hits.length
+              ? `${r.hits.length} named · ${r.total.toLocaleString()} on LinkedIn · ${r.ms}ms`
+              : r.detail || "No named people matched",
+          );
+        } else {
+          const r = await discoverCompaniesFn({
+            data: { ...f, pages: 8, count: 10 },
+          });
+          setCompanies(r.hits);
+          setPeople([]);
+          setTotal(r.total);
+          setMs(r.ms);
+          setDetail(r.detail);
+          toast.success(`${r.hits.length} companies · ${r.total.toLocaleString()} · ${r.ms}ms`);
+        }
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Search failed");
+      }
+    });
   }
 
   function count() {
@@ -160,35 +249,7 @@ export function DiscoverPanel() {
   }
 
   function search() {
-    start(async () => {
-      try {
-        if (tab === "people") {
-          const r = await discoverPeopleFn({ data: { ...payload, pages: 2 } });
-          setPeople(r.hits);
-          setCompanies([]);
-          setTotal(r.total);
-          setMs(r.ms);
-          setDetail(r.detail);
-          toast.success(
-            `${r.hits.length} named · ${r.total.toLocaleString()} on LinkedIn · ${r.ms}ms`,
-          );
-        } else {
-          const r = await discoverCompaniesFn({
-            data: { ...payload, pages: 8, count: 10 },
-          });
-          setCompanies(r.hits);
-          setPeople([]);
-          setTotal(r.total);
-          setMs(r.ms);
-          setDetail(r.detail);
-          toast.success(
-            `${r.hits.length} companies · ${r.total.toLocaleString()} on LinkedIn · ${r.ms}ms`,
-          );
-        }
-      } catch (e) {
-        toast.error(e instanceof Error ? e.message : "Search failed");
-      }
-    });
+    searchWith(tab, payload);
   }
 
   function csvCell(v: string | undefined) {
@@ -289,6 +350,17 @@ export function DiscoverPanel() {
             Companies
           </button>
         </div>
+        {icpMeta && (
+          <div className="rounded-lg border border-border bg-bg px-3 py-2 space-y-1">
+            <p className="text-[11px] font-medium">ICP filters · {icpMeta.source}</p>
+            <p className="text-[11px] text-fg-muted leading-snug">
+              {Object.entries(icpMeta.rationale)
+                .slice(0, 8)
+                .map(([k, v]) => `${k}: ${v}`)
+                .join(" · ")}
+            </p>
+          </div>
+        )}
 
         {tab === "people" ? (
           <>
@@ -534,9 +606,10 @@ export function DiscoverPanel() {
         </div>
         {people.length === 0 && companies.length === 0 ? (
           <div className="px-6 py-16 text-center text-sm text-fg-muted">
-            Search pulls LinkedIn Sales Nav + TheOrg org charts + Google
-            <code className="text-[10px]"> site:linkedin.com/in</code>. Deduped
-            by name.
+            People search uses the ApiAlt LinkedIn API — no personal Sales Nav
+            cookies. Directory pages (ContactOut, “email & phone number”) are
+            not people. Revenue, headcount, and hiring filters go through
+            Sales Navigator on ApiAlt.
           </div>
         ) : people.length > 0 ? (
           <DiscoverPeopleList people={people} listTab={listTab} onTab={setListTab} />

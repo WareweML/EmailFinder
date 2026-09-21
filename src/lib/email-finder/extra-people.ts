@@ -3,7 +3,7 @@
  * Each adapter is independent; failures are swallowed.
  */
 
-import { isPlausibleName, type DecodoHit } from "./decodo-serp";
+import { isDirectorySpam, isPlausibleName, type DecodoHit } from "./decodo-serp";
 
 export type ExtraHit = DecodoHit & { source: string };
 
@@ -17,6 +17,7 @@ function slugFrom(name: string, url: string): string {
 }
 
 function parseTitleName(title: string, url: string): ExtraHit | null {
+  if (isDirectorySpam(title, url)) return null;
   const head = title
     .replace(/\s*[\|–-]\s*(LinkedIn|Crunchbase|RocketReach|ZoomInfo|SignalHire|Wellfound|AngelList|About\.me|Craft).*$/i, "")
     .replace(/\s+/g, " ")
@@ -201,13 +202,9 @@ export async function extraPeople(opts: {
   const geo = opts.geo;
   const packs = await Promise.all([
     directoryXray("crunchbase.com/person", q, "crunchbase"),
-    directoryXray("rocketreach.co", q, "rocketreach"),
-    directoryXray("zoominfo.com/p", q, "zoominfo"),
-    directoryXray("signalhire.com", q, "signalhire"),
     directoryXray("wellfound.com/u", q, "wellfound"),
     directoryXray("about.me", q, "aboutme"),
     directoryXray("craft.co", q, "craft"),
-    directoryXray("contactout.com", q, "contactout"),
     orcidPeople(q),
     githubPeople(q),
     bingLinkedIn(q, geo),

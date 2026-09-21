@@ -439,10 +439,13 @@ export async function findByLinkedIn(input: {
     };
   }
 
-  if (!domain && profile?.company) {
+  if (profile?.company) {
     try {
+      const { companyNameFitsDomain } = await import("./identity-lock");
       const { resolveCompanyDomain } = await import("./company-suggest");
-      domain = (await resolveCompanyDomain(profile.company)) ?? "";
+      if (!domain || !companyNameFitsDomain(profile.company, domain)) {
+        domain = (await resolveCompanyDomain(profile.company)) ?? "";
+      }
     } catch {
       /* */
     }

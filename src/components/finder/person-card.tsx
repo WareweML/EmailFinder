@@ -16,10 +16,12 @@ export function PersonCard({
   data,
   sources,
   ms,
+  error,
 }: {
   data: PersonFindData;
   sources?: string[];
   ms?: number;
+  error?: string;
 }) {
   const li = data.profiles.find((p) => p.network === "linkedin")?.url ?? data.linkedin_url;
   return (
@@ -32,6 +34,19 @@ export function PersonCard({
             {[data.job_title, data.job_company_name].filter(Boolean).join(" · ")}
           </p>
         </div>
+        {error ? (
+          <p className="text-sm border border-border rounded-md p-3 leading-relaxed bg-surface-hover">
+            {error}
+          </p>
+        ) : null}
+        {li ? (
+          <p className="text-sm">
+            <span className="text-fg-muted">LinkedIn: </span>
+            <a href={li} target="_blank" rel="noreferrer" className="text-accent break-all">
+              {li}
+            </a>
+          </p>
+        ) : null}
         {row("Email", data.work_email)}
         {row("Phone", data.mobile_phone)}
         {data.pwned != null

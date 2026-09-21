@@ -6,8 +6,9 @@ import { createHash } from "node:crypto";
 import { normalizeDomain, isValidDomainShape } from "./normalize";
 import { classifyTitle, inferredSalary } from "./title-taxonomy";
 import { countryFromPerson } from "./employee-geo";
-import { enrichLinkedInProfile } from "./linkedin-public";
-import { harvestRecords, parseLinkedInGuest, emailBelongs } from "./person-records";
+import { enrichLinkedInProfile, cleanRoleTitle } from "./linkedin-public";
+import { harvestRecords, emailBelongs, companyLite } from "./person-records";
+import { isRoleBasedEmail, isRoleBasedLocal } from "./disposable";
 
 export type PersonFindInput = {
   email?: string;
@@ -199,7 +200,7 @@ export type PersonFindData = {
 
 export type PersonFindResponse = {
   data: PersonFindData;
-  meta: { durationMs: number; sources: string[] };
+  meta: { durationMs: number; sources: string[]; error?: string };
 };
 
 const TITLE_ROLE =
@@ -247,6 +248,21 @@ function stripMarks(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
 
+function plausiblePlace(s?: string | null): string | null {
+  if (!s) return null;
+  const t = s.replace(/\s+/g, " ").trim();
+  if (t.length < 3 || t.length > 48) return null;
+  if (/^[a-z]/.test(t)) return null;
+  if (
+    /university|vidyalaya|college|school|institute|campus|faculty|linkedin|http/i.test(
+      t,
+    )
+  )
+    return null;
+  if (!/^[A-Za-z]/.test(t)) return null;
+  return t;
+}
+
 function brandFromDomain(domain?: string | null): string | null {
   if (!domain) return null;
   const b = domain.replace(/^www\./, "").split(".")[0] ?? "";
@@ -283,14 +299,168 @@ function continentOf(country?: string | null): string | null {
   return null;
 }
 
-async function fetchHtml(url: string): Promise<string | null> {
-  try {
-    const { resilientFetch } = await import("./http");
-    const r = await resilientFetch(url, { timeoutMs: 8000, maxAttempts: 2, preferBot: true });
-    return r.ok ? r.body : null;
-  } catch {
-    return null;
+function compactToken(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function titleCaseLocal(s: string): string {
+  return s
+    .split(/[\s._+\-]+/)
+    .filter(Boolean)
+    .map((p) => p.charAt(0).toUpperCase() + p.slice(1).toLowerCase())
+    .join(" ");
+}
+
+/** Email local belongs to this person — miss is ok, wrong person is not. */
+function localFitsPerson(local: string, name: string, slug: string, blob: string, email?: string): boolean {
+  const loc = compactToken(local);
+  if (loc.length < 3) return false;
+  if (email && blob.toLowerCase().includes(email.toLowerCase())) return true;
+  const n = compactToken(name);
+  const s = compactToken(slug);
+  if (n.includes(loc) || s.includes(loc)) return true;
+  const parts = local.toLowerCase().split(/[._+\-]+/).filter((p) => p.length > 1);
+  const tokens = name.toLowerCase().split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return parts.every((p) => tokens.some((t) => t.startsWith(p) || p.startsWith(t)));
   }
+  if (parts[0] && parts[0].length >= 5) {
+    return tokens.some((t) => t === parts[0] || t.startsWith(parts[0]!));
+  }
+  return false;
+}
+
+type ReverseHit = { fullName: string; linkedinUrl?: string; title?: string; location?: string; source: string };
+
+async function reverseFromEmail(
+  email: string,
+  company?: string,
+  domain?: string,
+): Promise<ReverseHit | null> {
+  const local = (email.split("@")[0] ?? "").toLowerCase();
+  if (!local || isRoleBasedLocal(local) || isRoleBasedEmail(email)) return null;
+  const brand = (company || domain?.split(".")[0] || "").replace(/[-_]+/g, " ");
+
+  try {
+    const { lookupGravatar } = await import("./hibp");
+    const grav = await lookupGravatar(email);
+    const gName = (grav?.displayName ?? "").replace(/\s+/g, " ").trim();
+    if (gName.split(/\s+/).length >= 2) {
+      const li = grav?.accounts.find((a) => /linkedin/i.test(`${a.domain} ${a.url}`));
+      const url = li?.url && /linkedin\.com\/in\//i.test(li.url) ? li.url.split("?")[0] : undefined;
+      return {
+        fullName: gName,
+        linkedinUrl: url,
+        location: grav?.location ?? undefined,
+        source: "gravatar",
+      };
+    }
+  } catch {
+    /* */
+  }
+
+  const { decodoSearch, isPlausibleName } = await import("./decodo-serp");
+  const { profileSlugFromUrl } = await import("./identity-lock");
+  const queries = [
+    `"${email}"`,
+    `"${email}" linkedin`,
+    brand ? `site:linkedin.com/in "${local}" "${brand}"` : `site:linkedin.com/in "${local}"`,
+    domain ? `site:linkedin.com/in "${local}" "${domain}"` : "",
+    brand ? `"${local}" "${brand}" (linkedin OR director OR manager OR founder)` : "",
+    `site:rocketreach.co "${email}"`,
+    `site:theorg.com "${local}" ${brand ? `"${brand}"` : ""}`,
+  ].filter(Boolean);
+
+  let rows: Array<{ title?: string; link?: string; description?: string }> = [];
+  try {
+    rows = (await Promise.all(queries.map((q) => decodoSearch(q)))).flat();
+  } catch {
+    rows = [];
+  }
+
+  let best: ReverseHit | null = null;
+  let bestScore = 0;
+  for (const row of rows) {
+    const blob = `${row.title ?? ""} ${row.description ?? ""} ${row.link ?? ""}`;
+    const exactEmail = blob.toLowerCase().includes(email.toLowerCase());
+    const slug = profileSlugFromUrl(row.link ?? "") ?? "";
+    const head = (row.title ?? "")
+      .replace(/\s*\|\s*LinkedIn.*$/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const bits = head.split(/\s*[-–|]\s*/);
+    const name = (bits[0] ?? "").trim();
+    if (!isPlausibleName(name)) continue;
+    if (!localFitsPerson(local, name, slug, blob, email)) continue;
+    if (brand && /linkedin\.com\/in\//i.test(row.link ?? "")) {
+      const { identityLocked } = await import("./identity-lock");
+      if (!exactEmail && !identityLocked({ title: row.title ?? "", blob, fullName: name, company: brand, domain })) {
+        continue;
+      }
+    }
+    const li = slug ? `https://www.linkedin.com/in/${slug}/` : /linkedin\.com\/in\//i.test(row.link ?? "")
+      ? (row.link ?? "").split("?")[0]
+      : undefined;
+    const score = (exactEmail ? 20 : 0) + (li ? 8 : 0) + (slug && compactToken(slug).includes(compactToken(local)) ? 6 : 0);
+    if (score > bestScore) {
+      bestScore = score;
+      const rest = bits.slice(1).join(" - ");
+      const at = rest.match(/^(.*?)\s+(?:at|@)\s+(.+)$/i);
+      best = {
+        fullName: name,
+        linkedinUrl: li,
+        title: (at?.[1] ?? rest)?.trim() || undefined,
+        source: exactEmail ? "email-serp" : "email-linkedin",
+      };
+    }
+  }
+  if (best) return best;
+
+  if (domain && local.length >= 4) {
+    try {
+      const { lookupPersonAtCompany } = await import("./linkedin-company");
+      const hits = await lookupPersonAtCompany({ domain, companyName: company, query: local });
+      const hit = hits.find((h) => localFitsPerson(local, h.fullName, h.sourceUrl ?? "", `${h.fullName} ${h.title ?? ""}`));
+      if (hit?.fullName && hit.fullName.split(/\s+/).length >= 2) {
+        return {
+          fullName: hit.fullName,
+          linkedinUrl: hit.sourceUrl,
+          title: hit.title,
+          location: hit.location,
+          source: "linkedin-company-people",
+        };
+      }
+    } catch {
+      /* */
+    }
+  }
+
+  const parts = local.split(/[._+]+/).filter((p) => p.length > 1 && !/^\d+$/.test(p));
+  if (parts.length >= 2 && parts[0]!.length >= 2 && parts[parts.length - 1]!.length >= 2) {
+    const guessed = titleCaseLocal(parts.slice(0, 3).join(" "));
+    if (guessed.split(/\s+/).length >= 2 && domain) {
+      try {
+        const { lookupPersonAtCompany } = await import("./linkedin-company");
+        const hits = await lookupPersonAtCompany({ domain, companyName: company, query: guessed });
+        const hit = hits.find(
+          (h) => namesMatch(guessed, h.fullName) || localFitsPerson(local, h.fullName, h.sourceUrl ?? "", h.fullName),
+        );
+        if (hit?.fullName) {
+          return {
+            fullName: hit.fullName,
+            linkedinUrl: hit.sourceUrl,
+            title: hit.title,
+            location: hit.location,
+            source: "email-local-linkedin",
+          };
+        }
+      } catch {
+        /* */
+      }
+    }
+  }
+
+  return null;
 }
 
 export async function findPerson(input: PersonFindInput): Promise<PersonFindResponse> {
@@ -303,13 +473,115 @@ export async function findPerson(input: PersonFindInput): Promise<PersonFindResp
   let fullName = stripMarks((input.fullName ?? "").trim());
   if (!fullName && input.firstName) fullName = `${input.firstName} ${input.lastName ?? ""}`.trim();
   if (!company && domain) company = brandFromDomain(domain) ?? undefined;
-  const queryDomain = domain;
+  let queryDomain = domain;
 
+  const givenLinkedIn = linkedinUrl;
+  let slugRejected = false;
   if (linkedinUrl) {
     const { profileSlugFromUrl } = await import("./identity-lock");
-    const s = profileSlugFromUrl(linkedinUrl);
-    linkedinUrl = s ? `https://www.linkedin.com/in/${s}/` : undefined;
+    let s = profileSlugFromUrl(linkedinUrl);
+    if (!s) {
+      const m = linkedinUrl.match(/linkedin\.com\/(?:[a-z]{2}\/)?in\/([^/?#]+)/i);
+      const raw = m?.[1] ? decodeURIComponent(m[1]).replace(/\/+$/, "") : "";
+      if (raw && !/activity-|pulse-|urn:li/i.test(raw) && !/^\d+$/.test(raw) && raw.length >= 3) {
+        s = raw;
+      }
+    }
+    if (s) linkedinUrl = `https://www.linkedin.com/in/${s}/`;
+    else {
+      slugRejected = true;
+      linkedinUrl = undefined;
+    }
   }
+
+  let liPub: Awaited<ReturnType<typeof enrichLinkedInProfile>> = null;
+  if (linkedinUrl) {
+    try {
+      liPub = await enrichLinkedInProfile(linkedinUrl);
+    } catch {
+      liPub = null;
+    }
+    if (liPub) {
+      sources.push(
+        liPub.source === "apialt"
+          ? "linkedin-apialt"
+          : liPub.company || liPub.title
+            ? "linkedin-public"
+            : "linkedin-slug",
+      );
+    }
+    if (!fullName && liPub?.fullName && liPub.fullName.split(/\s+/).length >= 2) {
+      fullName = stripMarks(liPub.fullName);
+    }
+    if (!company && liPub?.company) company = liPub.company;
+    if (liPub?.domain) {
+      const { companyNameFitsDomain } = await import("./identity-lock");
+      if (!company || companyNameFitsDomain(company, liPub.domain)) {
+        domain = normalizeDomain(liPub.domain);
+      }
+    }
+    if (liPub?.title && !company) company = company || liPub.company;
+    if (!fullName) {
+      const { nameFromSlug } = await import("./linkedin");
+      const slug = linkedinUrl.match(/linkedin\.com\/in\/([^/]+)/i)?.[1] ?? "";
+      const guessed = nameFromSlug(slug);
+      if (guessed?.raw && guessed.raw.split(/\s+/).length >= 2) fullName = guessed.raw.trim();
+    }
+  }
+
+  if (company) {
+    try {
+      const { companyNameFitsDomain } = await import("./identity-lock");
+      const { resolveCompanyDomain } = await import("./company-suggest");
+      if (!domain || !companyNameFitsDomain(company, domain)) {
+        const d = await resolveCompanyDomain(company);
+        if (d) domain = normalizeDomain(d);
+        else if (domain && !companyNameFitsDomain(company, domain)) domain = undefined;
+      }
+    } catch {
+      /* */
+    }
+  }
+  if (!company && domain) company = brandFromDomain(domain) ?? company;
+  queryDomain = domain;
+
+  let reverseTitle: string | undefined;
+  if (email && !fullName) {
+    try {
+      const rev = await reverseFromEmail(email, company, domain);
+      if (rev?.fullName) {
+        fullName = stripMarks(rev.fullName);
+        sources.push(rev.source);
+        if (rev.linkedinUrl && !linkedinUrl) linkedinUrl = rev.linkedinUrl;
+        if (rev.title) reverseTitle = rev.title;
+      }
+    } catch {
+      /* */
+    }
+    if (linkedinUrl && !liPub) {
+      try {
+        liPub = await enrichLinkedInProfile(linkedinUrl);
+      } catch {
+        liPub = null;
+      }
+      if (liPub) {
+        sources.push(
+        liPub.source === "apialt"
+          ? "linkedin-apialt"
+          : liPub.company || liPub.title
+            ? "linkedin-public"
+            : "linkedin-slug",
+      );
+        if (liPub.fullName && liPub.fullName.split(/\s+/).length >= 2) fullName = stripMarks(liPub.fullName);
+        if (!company && liPub.company) company = liPub.company;
+        if (liPub.domain) {
+          const { companyNameFitsDomain } = await import("./identity-lock");
+          if (!company || companyNameFitsDomain(company, liPub.domain)) domain = normalizeDomain(liPub.domain);
+        }
+      }
+    }
+  }
+  queryDomain = domain;
 
   if (!linkedinUrl && fullName && domain && isValidDomainShape(domain)) {
     try {
@@ -364,9 +636,14 @@ export async function findPerson(input: PersonFindInput): Promise<PersonFindResp
   const first = fullName.split(/\s+/)[0] ?? "";
   const last = fullName.split(/\s+/).slice(1).join(" ") || "";
 
-  const [guestHtml, liPub, mx, emailHit, rec] = await Promise.all([
-    slug ? fetchHtml(`https://www.linkedin.com/in/${slug}/`) : Promise.resolve(null),
-    linkedinUrl ? enrichLinkedInProfile(linkedinUrl).catch(() => null) : Promise.resolve(null),
+  const relatedP =
+    company && domain
+      ? import("./company-suggest")
+          .then((m) => m.relatedCompanyDomains({ name: company!, domain: domain! }))
+          .catch(() => [])
+      : Promise.resolve([]);
+
+  const [mx, emailHit0, rec0, related] = await Promise.all([
     domain && isValidDomainShape(domain) ? import("./dns").then((m) => m.lookupMx(domain!).catch(() => null)) : Promise.resolve(null),
     fullName && domain && isValidDomainShape(domain)
       ? import("./waterfall")
@@ -375,25 +652,95 @@ export async function findPerson(input: PersonFindInput): Promise<PersonFindResp
           )
           .catch(() => null)
       : Promise.resolve(null),
-    harvestRecords({
-      fullName,
-      first,
-      company,
-      domain,
-      guestHtml: undefined,
-    }).catch(() => null),
+    fullName
+      ? harvestRecords({
+          fullName,
+          first,
+          company,
+          domain,
+          guestHtml: undefined,
+          linkedinSlug: slug,
+        }).catch(() => null)
+      : Promise.resolve(null),
+    relatedP,
   ]);
+  let rec = rec0;
 
-  if (guestHtml) sources.push("linkedin-guest");
-  if (liPub) sources.push("linkedin-public");
+  let emailHit = emailHit0;
+  const previousDomains = related.filter((r) => r.domain !== domain && r.hasMx).map((r) => r.domain);
+  if ((!emailHit?.best || (emailHit.best.confidence ?? 0) < 70) && previousDomains[0] && fullName) {
+    try {
+      const { waterfallFindEmail } = await import("./waterfall");
+      const alt = await waterfallFindEmail({
+        fullName,
+        domain: previousDomains[0]!,
+        linkedinUrl,
+        skipSmtp: false,
+        skipDeepResearch: true,
+      });
+      if (alt?.best && (!emailHit?.best || (alt.best.confidence ?? 0) > (emailHit.best.confidence ?? 0))) {
+        emailHit = alt;
+        sources.push("previous-domain");
+      }
+    } catch {
+      /* */
+    }
+  }
+
   if (mx) sources.push("mx");
   if (emailHit) sources.push("email-waterfall");
   if (rec?.sources) sources.push(...rec.sources);
 
-  const guest = guestHtml ? parseLinkedInGuest(guestHtml) : {};
+  if (domain && isValidDomainShape(domain) && !rec?.company_linkedin_url) {
+    try {
+      const co = await companyLite(domain, company ?? brandFromDomain(domain) ?? domain);
+      if (co) {
+        rec = rec
+          ? {
+              ...rec,
+              company_location: rec.company_location?.name ? rec.company_location : co.company_location,
+              company_linkedin_url: rec.company_linkedin_url ?? co.company_linkedin_url,
+              company_linkedin_id: rec.company_linkedin_id ?? co.company_linkedin_id,
+              company_industry: rec.company_industry ?? co.company_industry,
+              company_size: rec.company_size ?? co.company_size,
+              company_founded: rec.company_founded ?? co.company_founded,
+            }
+          : ({
+              sex: null,
+              birth_year: null,
+              birth_date: null,
+              mobile_phone: null,
+              phone_numbers: [],
+              personal_emails: [],
+              street_address: null,
+              postal_code: null,
+              locality: null,
+              region: null,
+              facebook_url: null,
+              facebook_id: null,
+              linkedin_id: null,
+              linkedin_connections: null,
+              summary: null,
+              job_summary: null,
+              industry: co.company_industry,
+              job_title: null,
+              job_start_date: null,
+              email_hint: null,
+              alt_emails: [],
+              ...co,
+              sources: ["company-linkedin"],
+            } as typeof rec);
+        sources.push("company-linkedin");
+      }
+    } catch {
+      /* */
+    }
+  }
+
   const jobTitle =
-    rec?.job_title ||
-    liPub?.title ||
+    cleanRoleTitle(rec?.job_title ?? undefined, company) ||
+    cleanRoleTitle(liPub?.title, company) ||
+    cleanRoleTitle(reverseTitle, company) ||
     null;
   const tax = classifyTitle(jobTitle);
   const workEmailRaw = emailHit?.best?.email || rec?.email_hint || email || null;
@@ -404,24 +751,31 @@ export async function findPerson(input: PersonFindInput): Promise<PersonFindResp
       : workEmailRaw;
 
   const personal = (rec?.personal_emails ?? []).filter((e) => emailBelongs(fullName, e));
-  const phones = [...(rec?.phone_numbers ?? []), ...(input.phone ? [input.phone] : [])].filter(Boolean);
-  let mobile = rec?.mobile_phone ?? phones[0] ?? null;
-  try {
-    const { findPersonMobile } = await import("./phone-waterfall");
-    const hit = await findPersonMobile({
-      fullName,
-      company,
-      domain: queryDomain,
-      linkedinUrl,
-      email: workEmail ?? email,
-    });
+  const phones =
+    company || queryDomain
+      ? [...(rec?.phone_numbers ?? []), ...(input.phone ? [input.phone] : [])].filter(Boolean)
+      : input.phone
+        ? [input.phone]
+        : [];
+  let mobile = (company || queryDomain ? rec?.mobile_phone : null) ?? phones[0] ?? null;
+  if (company || queryDomain) {
+    try {
+      const { findPersonMobile } = await import("./phone-waterfall");
+      const hit = await findPersonMobile({
+        fullName,
+        company,
+        domain: queryDomain,
+        linkedinUrl,
+        email: workEmail ?? email,
+      });
     if (hit) {
       mobile = hit.display;
       if (!phones.includes(hit.display)) phones.unshift(hit.display);
       sources.push(hit.source);
     }
-  } catch {
-    /* */
+    } catch {
+      /* */
+    }
   }
 
   let pwned: boolean | null = null;
@@ -452,12 +806,15 @@ export async function findPerson(input: PersonFindInput): Promise<PersonFindResp
   }
 
   const countryName =
-    countryFromPerson(linkedinUrl ?? "", `${liPub?.location ?? ""} ${rec?.locality ?? ""}`) ||
-    rec?.company_location?.country ||
-    (/\.in$/i.test(domain ?? "") || rec?.locality ? "india" : null);
-  const locality = rec?.locality ?? null;
-  const region = rec?.region ?? rec?.company_location?.region ?? null;
-  const locName = [locality, region, countryName].filter(Boolean).join(", ") || null;
+    countryFromPerson(linkedinUrl ?? "", `${liPub?.location ?? ""}`) ||
+    (fullName ? rec?.company_location?.country : null) ||
+    (fullName && /\.in$/i.test(domain ?? "") ? "india" : null);
+  const locality = plausiblePlace(rec?.locality);
+  const region = plausiblePlace(rec?.region ?? (fullName ? rec?.company_location?.region : null));
+  const locName =
+    plausiblePlace(liPub?.location) ||
+    [locality, region, countryName].filter(Boolean).join(", ") ||
+    null;
   const country = countryName?.toLowerCase() ?? null;
   const continent = continentOf(country);
   const today = new Date().toISOString().slice(0, 10);
@@ -480,8 +837,34 @@ export async function findPerson(input: PersonFindInput): Promise<PersonFindResp
     });
   }
 
-  const experience: PersonExperience[] = [
-    {
+  const experience: PersonExperience[] = [];
+  if (liPub?.experience?.length) {
+    for (const e of liPub.experience) {
+      const role = cleanRoleTitle(e.title, e.company);
+      if (!role && !e.company) continue;
+      const isPrimary = !!e.current;
+      const coName = e.company ?? null;
+      const site =
+        isPrimary && domain ? `https://${domain}` : null;
+      const eTax = classifyTitle(role ?? null);
+      experience.push({
+        company: emptyCompany(coName, site),
+        start_date: isPrimary ? rec?.job_start_date ?? null : null,
+        end_date: isPrimary ? null : null,
+        is_primary: isPrimary,
+        location_names: isPrimary && locName ? [locName] : [],
+        title: {
+          name: role ?? null,
+          role: eTax.role,
+          sub_role: eTax.subRole,
+          levels: eTax.levels,
+          class: eTax.titleClass,
+        },
+        summary: isPrimary ? rec?.job_summary ?? rec?.summary ?? null : null,
+      });
+    }
+  } else if (jobTitle) {
+    experience.push({
       company: emptyCompany(companyName ?? null, domain ? `https://${domain}` : null),
       start_date: rec?.job_start_date ?? null,
       end_date: null,
@@ -495,8 +878,8 @@ export async function findPerson(input: PersonFindInput): Promise<PersonFindResp
         class: tax.titleClass,
       },
       summary: rec?.job_summary ?? rec?.summary ?? null,
-    },
-  ];
+    });
+  }
 
   const data: PersonFindData = {
     id: idFor(linkedinUrl || workEmail || fullName + (domain ?? "")),
@@ -511,8 +894,8 @@ export async function findPerson(input: PersonFindInput): Promise<PersonFindResp
     birth_date: rec?.birth_date ?? null,
     linkedin_url: linkedinUrl ?? null,
     linkedin_username: slugName,
-    linkedin_id: rec?.linkedin_id ?? guest.linkedin_id ?? null,
-    linkedin_connections: rec?.linkedin_connections ?? guest.linkedin_connections ?? null,
+    linkedin_id: rec?.linkedin_id ?? null,
+    linkedin_connections: rec?.linkedin_connections ?? null,
     facebook_url: rec?.facebook_url ?? null,
     facebook_username: handleOf(rec?.facebook_url ?? null, "facebook.com"),
     facebook_id: rec?.facebook_id ?? null,
@@ -531,7 +914,7 @@ export async function findPerson(input: PersonFindInput): Promise<PersonFindResp
     ],
     industry,
     headline: jobTitle,
-    summary: rec?.summary ?? guest.summary ?? null,
+    summary: rec?.summary ?? null,
     job_title: jobTitle,
     job_title_role: tax.role,
     job_title_sub_role: tax.subRole,
@@ -592,7 +975,7 @@ export async function findPerson(input: PersonFindInput): Promise<PersonFindResp
     certifications: [],
     languages: [],
     profiles,
-    inferred_salary: inferredSalary(tax.levels, countryName),
+    inferred_salary: jobTitle && tax.levels.length ? inferredSalary(tax.levels, countryName) : null,
     inferred_years_experience: rec?.job_start_date
       ? Math.max(0, new Date().getFullYear() - Number(rec.job_start_date.slice(0, 4)))
       : null,
@@ -610,5 +993,24 @@ export async function findPerson(input: PersonFindInput): Promise<PersonFindResp
     dataset_version: "live-1",
   };
 
-  return { data, meta: { durationMs: Date.now() - t0, sources: [...new Set(sources)] } };
+  return {
+    data,
+    meta: {
+      durationMs: Date.now() - t0,
+      sources: [...new Set(sources)],
+      error: slugRejected
+        ? "That LinkedIn URL is not a person profile. Paste linkedin.com/in/username — not a post, company page, or activity."
+        : linkedinUrl && !companyName
+        ? (await import("./linkedin-http").then((m) => m.apialtConfigured()).catch(() => false))
+          ? "ApiAlt could not read this LinkedIn card, and it is not in the public index. We did not invent a company, email, or phone."
+          : (await import("./linkedin-http").then((m) => m.liCircuitOpen()).catch(() => false))
+          ? "LinkedIn challenged this Sales Nav session, so we could not read the live card. Name is from the URL slug. We did not invent a company, email, or phone. Open Sales Navigator from the same SOCKS IP, pass any security check, then paste a fresh li_at / li_a / JSESSIONID."
+          : "This LinkedIn profile is not in the public index and the live card did not include an employer. We did not invent a company, email, or phone."
+        : givenLinkedIn && !fullName
+          ? "Could not read a name from that LinkedIn URL."
+          : email && !fullName
+            ? "Mailbox and employer are confirmed. This address is not in the public person index, so we did not invent a name, title, or LinkedIn."
+            : undefined,
+    },
+  };
 }

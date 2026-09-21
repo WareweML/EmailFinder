@@ -4,6 +4,7 @@
  */
 
 import { resilientFetch, mapPool } from "./http";
+import { isCollisionBrand, compact as compactId } from "./identity-lock";
 
 export type Lookalike = {
   name: string;
@@ -61,12 +62,22 @@ function nicheOf(name: string, description?: string, industry?: string): string 
   const blob = `${name} ${description ?? ""} ${industry ?? ""}`.toLowerCase();
   if (/kubernetes|k8s|kubecost|container cost|finops/.test(blob))
     return "Kubernetes cost optimization";
+  if (/dental|dentist|tmj|orthodont|oral surgeon/.test(blob))
+    return "dental clinic TMJ";
+  if (/hospital|medical practice|clinic|physician/.test(blob))
+    return "medical clinic";
+  if (/real estate|realty|property (broker|consultant|developer)|housing|realtor/.test(blob))
+    return "real estate consulting";
   if (/payment|fintech|billing/.test(blob)) return "payment processing";
-  if (/engineer|construction|civil/.test(blob)) return "engineering consulting";
-  const words = (description ?? industry ?? name)
+  if (/engineer|construction|civil/.test(blob) && !/software|saas/.test(blob))
+    return "engineering consulting";
+  if (industry && industry.length > 3 && industry.length < 40) return industry.toLowerCase();
+  const stop =
+    /^(going|with|the|tide|what|here|that|this|from|have|been|made|our|for|and|not|are|was|were|leading|company|into|about|their|your|will|just)$/i;
+  const words = `${industry ?? ""} ${name}`
     .replace(/[^A-Za-z0-9 ]/g, " ")
     .split(/\s+/)
-    .filter((w) => w.length > 3)
+    .filter((w) => w.length > 3 && !stop.test(w))
     .slice(0, 4)
     .join(" ");
   return words || name;
@@ -97,7 +108,9 @@ function countryOf(loc?: string): string | undefined {
   if (/\bgermany\b|\bberlin\b|\bmunich\b/.test(t)) return "Germany";
   if (/\bdubai\b|\buae\b|united arab/.test(t)) return "United Arab Emirates";
   if (/\bsingapore\b/.test(t)) return "Singapore";
-  if (/\bindia\b/.test(t)) return "India";
+  if (/\bindia\b|\bgurgaon\b|\bgurugram\b|\bdelhi\b|\bmumbai\b|\bbengaluru\b|\bnoida\b/.test(t))
+    return "India";
+  if (/\bgreece\b|\blarissa\b|\bthessaly\b|\bathens\b/.test(t)) return "Greece";
   if (/\bnetherlands\b|\bamsterdam\b/.test(t)) return "Netherlands";
   const last = loc.split(",").slice(-1)[0]?.trim() ?? "";
   const map: Record<string, string> = {
@@ -116,13 +129,22 @@ function countryOf(loc?: string): string | undefined {
   return map[last];
 }
 
-function industryBucket(s?: string): "software" | "engineering" | "finance" | "other" {
+function industryBucket(
+  s?: string,
+): "software" | "engineering" | "finance" | "health" | "realestate" | "other" {
   const t = (s ?? "").toLowerCase();
+  if (/real estate|realty|property|housing|realtor|broker/.test(t)) return "realestate";
+  if (/dental|dentist|tmj|hospital|health|clinic|medical|physician|pharma/.test(t)) return "health";
   if (/engineer|construction|civil|architect|environmental consulting/.test(t) && !/software|saas/.test(t))
     return "engineering";
   if (/payment|fintech|bank|billing/.test(t)) return "finance";
-  if (/software|saas|internet|cloud|information|computer|kubernetes/.test(t)) return "software";
+  if (/software|saas|internet|cloud|information|computer|kubernetes|it services|it consulting/.test(t))
+    return "software";
   return "other";
+}
+
+function localService(bucket: ReturnType<typeof industryBucket>) {
+  return bucket === "realestate" || bucket === "health" || bucket === "engineering";
 }
 
 function namesFromSnippet(text: string, self: string): string[] {
@@ -159,15 +181,21 @@ export async function findLookalikes(opts: {
   name: string;
   description?: string;
   industry?: string;
+  location?: string;
+  country?: string;
 }): Promise<Lookalike[]> {
   const self = opts.name.replace(/\([^)]*\)/g, "").trim() || opts.domain.split(".")[0]!;
   const niche = nicheOf(self, opts.description, opts.industry);
+  const selfCountry = countryOf(opts.country) || countryOf(opts.location);
   const { decodoShards } = await import("./decodo-serp");
+  const geo = selfCountry && localService(industryBucket(`${opts.industry ?? ""} ${opts.description ?? ""} ${niche}`))
+    ? selfCountry
+    : "";
   const queries = [
-    `"${self}" alternatives OR competitors ${niche}`,
-    `best ${niche} companies 2026`,
+    `"${self}" alternatives OR competitors ${niche}${geo ? ` ${geo}` : ""}`,
+    `best ${niche} companies${geo ? ` ${geo}` : ""} 2026`,
     `site:g2.com/products ${self} alternatives`,
-    `site:linkedin.com/company "${niche}"`,
+    `site:linkedin.com/company "${niche}"${geo ? ` ${geo}` : ""}`,
   ];
   if (/kubernetes|k8s|finops/i.test(niche)) {
     queries.push(`site:linkedin.com/company "cost optimization" Kubernetes`);
@@ -175,6 +203,12 @@ export async function findLookalikes(opts: {
   } else if (/engineer|civil|construction/i.test(niche)) {
     queries.push(`"${self}" competitors (Jacobs OR AECOM OR WSP OR Stantec OR Arcadis OR Aurecon)`);
     queries.push(`site:linkedin.com/company "engineering consulting"`);
+  } else if (/dental|tmj|clinic|medical/i.test(niche)) {
+    queries.push(`"${self}" similar dentists OR "TMJ specialist" clinic`);
+    queries.push(`site:linkedin.com/company "dental clinic" OR "TMJ"`);
+  } else if (/real estate/i.test(niche)) {
+    queries.push(`"${self}" competitors (Anarock OR JLL OR "CBRE" OR "Knight Frank" OR PropTiger OR MagicBricks)`);
+    queries.push(`site:linkedin.com/company "real estate consulting"${geo ? ` ${geo}` : ""}`);
   }
   const pages = await decodoShards(queries).catch(() => [] as Array<Array<{ title?: string; description?: string; link?: string }>>);
   const seeds = new Map<string, Seed>();
@@ -319,10 +353,18 @@ export async function findLookalikes(opts: {
     const k = s.name.toLowerCase();
     if (seen.has(k)) continue;
     if (!s.linkedinUrl) continue;
-    if (/education|entertainment|nonprofit|government|higher education|media production|advertising services|hospitals and health care|marketing services|book and periodical/i.test(s.industry ?? ""))
+    if (/education|entertainment|nonprofit|government|higher education|media production|advertising services|marketing services|book and periodical/i.test(s.industry ?? ""))
       continue;
+    if (selfBucket !== "health" && /hospitals and health care/i.test(s.industry ?? "")) continue;
+    if (selfBucket === "health" && /staffing|recruiting|human resources|information technology|internet/i.test(s.industry ?? ""))
+      continue;
+    if (/hire\s+\d|recruitment consultant/i.test(s.name)) continue;
     if (/densify/i.test(`${s.name} ${s.linkedinUrl ?? ""}`)) continue;
     if (namesClose(s.name, self)) continue;
+    if (isCollisionBrand(opts.domain)) {
+      const stem = compactId(opts.domain.split(".")[0] ?? "");
+      if (stem.length >= 5 && compactId(s.name).includes(stem)) continue;
+    }
     if (/^full control|^sitemap|^sign in|^venture capital|^login$|^media$/i.test(s.name)) continue;
     if (/^spotio$/i.test(s.name)) continue;
     const other = industryBucket(`${s.industry ?? ""} ${s.description ?? ""}`);
@@ -338,6 +380,17 @@ export async function findLookalikes(opts: {
       if (/engineering & consulting|consulting engineers|business consultant|business and engineering/i.test(s.name) && !s.size)
         continue;
     }
+    if (selfBucket === "health") {
+      if (other === "software" || other === "engineering" || other === "finance") continue;
+      if (other === "other" && !/dental|dentist|tmj|clinic|hospital|health|ortho|oral/i.test(blob)) continue;
+    }
+    if (selfBucket === "realestate") {
+      if (other !== "realestate" && !/real estate|realty|property|housing|broker/i.test(blob)) continue;
+    }
+    if (selfBucket !== "software" && other === "software") continue;
+    const otherCountry = countryOf(s.location) || countryOf(s.country);
+    if (localService(selfBucket) && selfCountry && otherCountry && otherCountry !== selfCountry) continue;
+    if (!s.industry && !s.description) continue;
     seen.add(k);
     const { score: _s, ...rest } = s;
     out.push({

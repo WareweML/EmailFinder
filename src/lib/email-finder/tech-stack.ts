@@ -20,9 +20,9 @@ export interface TechStackResult {
   sources: string[];
 }
 
-export const JOB_TECH: Array<{ name: string; category: string; re: RegExp }> = [
-  { name: "SAP", category: "Accounting & Finance", re: /\bSAP\b/ },
-  { name: "Salesforce", category: "CRM", re: /\bSalesforce\b/ },
+export const JOB_TECH: Array<{ name: string; category: string; re: RegExp; need?: RegExp }> = [
+  { name: "SAP", category: "Accounting & Finance", re: /\bSAP\b/, need: /S\/4|HANA|FICO|ABAP|SuccessFactors|Basis|\bERP\b/i },
+  { name: "Salesforce", category: "CRM", re: /\bSalesforce\b/, need: /Sales Cloud|Service Cloud|Apex|Administrator|Pardot/i },
   { name: "Pardot", category: "Marketing Automation", re: /\bPardot\b/ },
   { name: "Microsoft 365", category: "Productivity", re: /Microsoft 365|Office 365/i },
   { name: "Python", category: "Programming Language", re: /\bPython\b/ },
@@ -84,12 +84,22 @@ export async function detectTechStack(
     jobEvidence(domain, extraText),
   ]);
   sources.push(...w3.sources, ...bw.sources, ...live.sources, ...jobs.sources);
-  for (const t of [...bw.hits, ...w3.hits, ...live.hits, ...jobs.hits]) {
+  for (const t of [...bw.hits, ...w3.hits, ...live.hits]) {
+    add(t.name, t.category, t.evidence, t.confidence);
+  }
+  const cheapHost = technologies.some((t) =>
+    /hostinger|hpanel|wix|squarespace|shopify|wordpress\.com|bluehost|godaddy/i.test(t.name),
+  );
+  for (const t of jobs.hits) {
+    if (cheapHost && /^(SAP|Salesforce|Pardot|Kubernetes|Azure DevOps|Pyspark)$/i.test(t.name)) continue;
     add(t.name, t.category, t.evidence, t.confidence);
   }
   if (extraText) {
     for (const r of JOB_TECH) {
-      if (r.re.test(extraText)) add(r.name, r.category, "jobs / company copy", 70);
+      if (!r.re.test(extraText)) continue;
+      if (r.need && !r.need.test(extraText)) continue;
+      if (cheapHost && /^(SAP|Salesforce|Pardot|Kubernetes)$/i.test(r.name)) continue;
+      add(r.name, r.category, "jobs / company copy", 70);
     }
   }
   technologies.sort((a, b) => b.confidence - a.confidence);
@@ -255,11 +265,9 @@ async function jobEvidence(
   try {
     const { decodoSearch } = await import("./decodo-serp");
     const [rows, rows2] = await Promise.all([
+      decodoSearch(`site:${domain} (SAP OR Salesforce OR Kubernetes OR Pardot OR "Azure DevOps")`),
       decodoSearch(
-        `"${brand}" (SAP OR Salesforce OR Kubernetes OR "Azure DevOps" OR Pardot OR PySpark OR "GitHub Actions" OR Python) (engineer OR developer OR "job description" OR careers) -hair -straightener -immigration`,
-      ),
-      decodoSearch(
-        `"${brand}" (Salesforce OR SAP) (Administrator OR Developer OR Engineer) -immigration -hair`,
+        `"${brand}" ("SAP FICO" OR "SAP ABAP" OR "S/4HANA" OR "SAP consultant" OR "Salesforce Administrator") (hiring OR careers OR jobs)`,
       ),
     ]);
     blob +=
@@ -273,8 +281,12 @@ async function jobEvidence(
   const lines = blob.split(/\n+/);
   for (const t of JOB_TECH) {
     const ok = lines.some((line) => {
+      if (/SAP OR Salesforce|OR Kubernetes/i.test(line)) return false;
       if (!t.re.test(line)) return false;
-      if (!new RegExp(`\\b${brand}\\b`, "i").test(line)) return false;
+      if (t.need && !t.need.test(line)) return false;
+      const onSite = new RegExp(domain.replace(/\./g, "\\."), "i").test(line);
+      const employer = new RegExp(`\\b${brand}\\b`, "i").test(line);
+      if (!onSite && !employer) return false;
       if (/immigration|hair|straightener|wella/i.test(line)) return false;
       return true;
     });

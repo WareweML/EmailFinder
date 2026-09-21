@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Building2,
   CheckCircle2,
@@ -27,6 +27,7 @@ import { MapsPanel } from "./maps-panel";
 import { SignalsPanel } from "./signals-panel";
 import { IcpPanel } from "./icp-panel";
 import { ApiDocs } from "./api-docs";
+import { ICP_DISCOVER_EVENT } from "@/lib/email-finder/icp-discover-bridge";
 import {
   domainSearchFn,
   findEmailFn,
@@ -76,6 +77,12 @@ export function FinderApp() {
   const [mode, setMode] = useState<Mode>("finder");
   const [tab, setTab] = useState<TabId>("company");
   const [pending, setPending] = useState(false);
+
+  useEffect(() => {
+    const onOpen = () => setTab("discover");
+    window.addEventListener(ICP_DISCOVER_EVENT, onOpen);
+    return () => window.removeEventListener(ICP_DISCOVER_EVENT, onOpen);
+  }, []);
 
   const [domainQuery, setDomainQuery] = useState("");
   const [domainResult, setDomainResult] =
@@ -231,7 +238,8 @@ export function FinderApp() {
         });
         setPersonResult(res as PersonFindResponse);
         if (res.data.work_email) toast.success(`Found ${res.data.work_email}`);
-        else toast.message("Profile enriched");
+        else if (res.data.full_name) toast.message("Profile enriched");
+        else toast.error(res.meta.error || "Could not read that LinkedIn profile");
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "LinkedIn find failed");
       }
@@ -432,9 +440,12 @@ export function FinderApp() {
                   <Input
                     value={titleFilter}
                     onChange={(e) => setTitleFilter(e.target.value)}
-                    placeholder="Optional title filter: CEO, engineer, sales…"
-                    className="max-w-md"
+                    placeholder="Roles before search: CIO, Marketing Head, Founder — blank = all"
+                    className="max-w-xl"
                   />
+                  <p className="text-[11px] text-fg-subtle px-1">
+                    Comma-separated. Applied to LinkedIn/SERP before results load. Empty searches every employee.
+                  </p>
                   {domainSuggest && !domainResult && !pending && (
                     <button
                       type="button"
@@ -520,6 +531,7 @@ export function FinderApp() {
                     data={personResult.data}
                     sources={personResult.meta.sources}
                     ms={personResult.meta.durationMs}
+                    error={personResult.meta.error}
                   />
                 )}
                 {findResult && <ResultCard result={findResult} />}
@@ -580,6 +592,7 @@ export function FinderApp() {
                     data={personResult.data}
                     sources={personResult.meta.sources}
                     ms={personResult.meta.durationMs}
+                    error={personResult.meta.error}
                   />
                 )}
                 {findResult && <ResultCard result={findResult} />}

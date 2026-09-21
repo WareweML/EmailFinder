@@ -75,7 +75,7 @@ export async function enrichCompanyProfile(
   domain: string,
   companyName: string,
   seedSimilar: SimilarCompany[] = [],
-  extra?: { description?: string; industry?: string },
+  extra?: { description?: string; industry?: string; location?: string; country?: string },
 ): Promise<CompanyProfile> {
   const name =
     companyName.replace(/\([^)]*\)/g, "").trim() || domain.split(".")[0]!;
@@ -88,6 +88,8 @@ export async function enrichCompanyProfile(
       name,
       description: extra?.description,
       industry: extra?.industry,
+      location: extra?.location,
+      country: extra?.country,
     });
   } catch {
     similar = [];

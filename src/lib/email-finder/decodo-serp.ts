@@ -3,7 +3,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { employerInTitle, isPersonSlug, otherEmployerInTitle } from "./identity-lock";
+import { companyOnCard, employerInTitle, isPersonSlug, otherEmployerInTitle } from "./identity-lock";
 
 export { companyOnCard, isPersonSlug } from "./identity-lock";
 
@@ -63,16 +63,37 @@ export async function decodoShards(queries: string[]): Promise<Organic[][]> {
   return Promise.all(queries.map((q) => decodoSearch(q)));
 }
 
+export function isDirectorySpam(title: string, url = ""): boolean {
+  const b = `${title} ${url}`.toLowerCase();
+  return /contactout|rocketreach|apollo\.io|zoominfo|lusha|snov\.io|hunter\.io|signalhire|leadiq|clearbit|scribd|slideshare|pdl\.io|peopledatalabs|email.?finder|find.?email|email\s*(&|and|\/|,|\+|＆)?\s*phone|phone\s*number|mobile\s*number|whatsapp\s*number|contact.?details/.test(
+    b,
+  );
+}
+
 export function isPlausibleName(name: string): boolean {
-  const bits = name
+  const raw = name.replace(/\s+/g, " ").trim();
+  if (!raw) return false;
+  if (isDirectorySpam(raw, "")) return false;
+  const cleaned = raw
+    .replace(/['']s\s+(email|phone|linkedin|profile).*$/i, "")
+    .replace(/\b(email|phone|numbers?|contact|linkedin|profile|hunter|apollo|lusha)\b/gi, " ");
+  if (cleaned.trim() !== raw && /email|phone|contactout|rocketreach/i.test(raw)) return false;
+  const bits = cleaned
     .replace(/[^\p{L}\s.'-]/gu, " ")
     .replace(/\s+/g, " ")
     .trim()
     .split(" ")
     .filter(Boolean);
-  if (bits.length < 2 || bits.length > 5) return false;
+  if (bits.length < 2 || bits.length > 4) return false;
   if (bits.some((b) => b.length < 2)) return false;
-  if (bits.some((b) => /^(the|and|for|with|from|linkedin|profile|view)$/i.test(b))) return false;
+  if (
+    bits.some((b) =>
+      /^(the|and|for|with|from|linkedin|profile|view|email|phone|number|contact|luxury|travel|what|mart|team|org|chart|gtm)$/i.test(
+        b,
+      ),
+    )
+  )
+    return false;
   return bits.every((b) => /^[\p{L}][\p{L}.'-]*$/u.test(b));
 }
 
@@ -83,6 +104,7 @@ function parseHead(row: Organic): DecodoHit | null {
   if (!slugM) return null;
   const slug = decodeURIComponent(slugM[1]!);
   if (!isPersonSlug(slug)) return null;
+  if (isDirectorySpam(row.title ?? "", url)) return null;
   const head = (row.title ?? "")
     .replace(/\s*\|\s*LinkedIn.*$/i, "")
     .replace(/\s+/g, " ")
@@ -101,9 +123,16 @@ export function peopleFromOrganic(rows: Organic[], companyName: string, domain?:
     const parsed = parseHead(row);
     if (!parsed || seen.has(parsed.slug)) continue;
     const blob = `${row.title ?? ""} ${row.description ?? ""}`;
-    if (companyName.length >= 3 && !employerInTitle(row.title ?? "", companyName, domain)) continue;
+    const onTitle = employerInTitle(row.title ?? "", companyName, domain);
+    const onBlob = companyName.length >= 3 && companyOnCard(blob, companyName, domain);
+    if (companyName.length >= 3 && !onTitle && !onBlob) continue;
     if (otherEmployerInTitle(row.title ?? "", companyName, domain)) continue;
     if (/\b(former|ex-|previously|alumni)\b/i.test(blob)) continue;
+    if (!parsed.title) {
+      const esc = companyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const at = blob.match(new RegExp(`([A-Za-z][A-Za-z0-9+ /,&'’.-]{2,70}?)\\s+at\\s+${esc}`, "i"));
+      if (at?.[1] && !/linkedin|profile|view/i.test(at[1])) parsed.title = at[1].trim();
+    }
     seen.add(parsed.slug);
     out.push(parsed);
   }
