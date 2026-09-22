@@ -212,6 +212,21 @@ function companySlugFromUrl(raw?: string): string | undefined {
   }
 }
 
+function looksLikePersonName(raw?: string): boolean {
+  if (!raw) return false;
+  const n = raw.replace(/\s*\|\s*LinkedIn.*$/i, "").replace(/\s+/g, " ").trim();
+  if (!n || /^linkedin member$/i.test(n)) return false;
+  const bits = n.split(/\s+/);
+  if (bits.length < 2 || bits.length > 5) return false;
+  if (
+    /\b(engineer|manager|director|consultant|officer|founder|intern|specialist|analyst|lead|president|partner|head)\b/i.test(
+      n,
+    )
+  )
+    return false;
+  return bits.every((b) => /^[\p{L}][\p{L}.'’-]*$/u.test(b));
+}
+
 function personUrl(row: Record<string, unknown>, slug?: string): string | undefined {
   const raw = firstStr(
     row.linkedinUrl,
@@ -242,24 +257,30 @@ function personName(row: Record<string, unknown>): string | undefined {
     row.full_name_display,
     composed,
   );
-  if (!full) return undefined;
-  const n = full.replace(/\s*\|\s*LinkedIn.*$/i, "").replace(/\s+/g, " ").trim();
+  const titled = looksLikePersonName(firstStr(row.title)) ? firstStr(row.title) : undefined;
+  const n = (full || titled || "")
+    .replace(/\s*\|\s*LinkedIn.*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
   if (n.split(/\s+/).length < 2) return undefined;
   if (/^linkedin member$/i.test(n)) return undefined;
+  if (!looksLikePersonName(n) && !full) return undefined;
   return n;
 }
 
 function headlineBits(row: Record<string, unknown>): { title?: string; company?: string } {
+  const name = personName(row);
   const raw = firstStr(
+    row.snippet,
+    row.headline,
     row.currentTitle,
     row.current_title,
-    row.title,
-    row.headline,
     row.occupation,
     row.position,
     isObj(row.currentPosition) ? row.currentPosition.title : undefined,
+    firstStr(row.title) && firstStr(row.title) !== name ? row.title : undefined,
   );
-  const company = firstStr(
+  const companyHint = firstStr(
     row.currentCompany,
     row.current_company,
     row.companyName,
@@ -268,15 +289,36 @@ function headlineBits(row: Record<string, unknown>): { title?: string; company?:
     isObj(row.currentCompany) ? row.currentCompany.name : undefined,
     isObj(row.currentPosition) ? row.currentPosition.companyName ?? row.currentPosition.company : undefined,
   );
-  if (!raw) return { company };
-  const at = raw.match(/^(.*?)\s+(?:at|@|·)\s+(.+)$/i);
-  if (at) {
-    return {
-      title: at[1]!.trim() || undefined,
-      company: company || at[2]!.replace(/\s*[-–|].*$/, "").trim() || undefined,
-    };
+  if (!raw) return { company: companyHint };
+  const MEDIA_AT =
+    /\b(featured|published|interviewed|quoted|mentioned|appeared|covered)\s+at\b/i;
+  const parts = raw
+    .split(/\s*[|•/]\s*/)
+    .map((s) => s.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .filter((p) => !MEDIA_AT.test(p) && !/\b(turning data|avid |voracious |open to connect|helping |passionate |love to )\b/i.test(p));
+  const primary =
+    parts.find((p) =>
+      /\b(manager|director|engineer|officer|lead|architect|consultant|analyst|founder|head|specialist|admin)\b/i.test(
+        p,
+      ),
+    ) ||
+    parts[0] ||
+    raw.replace(/\s+/g, " ").trim();
+  const dash = primary.match(
+    /^((?:Senior\s+|Jr\.?\s+|Lead\s+|Principal\s+|Staff\s+)?(?:Analyst|Engineer|Manager|Director|Consultant|Writer|Designer|Specialist|Associate|Scientist|Architect|Developer|Officer|Founder|Intern))\s+[-–]\s+(.+)$/i,
+  );
+  if (dash && dash[2]!.split(/\s+/).length <= 6) {
+    return { title: dash[1]!.trim(), company: companyHint || dash[2]!.replace(/\s*[-–|].*$/, "").trim() };
   }
-  return { title: raw, company };
+  const at = primary.match(/^(.*?)\s+(?:at|@|·)\s+(.+)$/i);
+  if (at && !MEDIA_AT.test(primary)) {
+    const co = at[2]!.replace(/\s*[-–|].*$/, "").trim();
+    if (co && !/^(linkedin|data science|ai based solutions)$/i.test(co)) {
+      return { title: at[1]!.trim() || undefined, company: companyHint || co || undefined };
+    }
+  }
+  return { title: primary.slice(0, 120) || undefined, company: companyHint };
 }
 
 function locationOf(row: Record<string, unknown>): string | undefined {
@@ -333,9 +375,15 @@ export function profileFromApialt(data: unknown, slug: string): PublicProfile | 
   if (!fullName) return null;
   const bits = headlineBits(row);
   const exp = experienceOf(row);
-  const current = exp?.find((e) => e.current && e.company) ?? exp?.[0];
+  const current = exp?.find((e) => e.current && (e.title || e.company)) ?? exp?.[0];
   const company = bits.company || current?.company;
-  const title = bits.title || current?.title;
+  const headlineLooksJob =
+    bits.title &&
+    /\b(manager|director|engineer|officer|lead|architect|consultant|analyst|founder|head|specialist|admin|assurance)\b/i.test(
+      bits.title,
+    ) &&
+    !/\b(helping|passionate|love to|enthusiast)\b/i.test(bits.title);
+  const title = (headlineLooksJob ? bits.title : undefined) || current?.title || bits.title;
   const loc = locationOf(row);
   const url = personUrl(row, slug) ?? `https://www.linkedin.com/in/${slug}/`;
   const site = firstStr(
@@ -421,7 +469,13 @@ export function companiesFromApialt(data: unknown): DiscoverCompany[] {
   const out: DiscoverCompany[] = [];
   const seen = new Set<string>();
   for (const row of rows) {
-    const name = firstStr(row.name, row.companyName, row.company_name, isObj(row.company) ? row.company.name : undefined);
+    const name = firstStr(
+      row.name,
+      row.companyName,
+      row.company_name,
+      isObj(row.company) ? row.company.name : undefined,
+      row.title,
+    );
     if (!name) continue;
     const url = firstStr(
       row.linkedinUrl,
@@ -646,6 +700,19 @@ export async function apialtProfileSearch(q: string, limit = 10): Promise<Discov
   const run = await apialtRun(
     "linkedin.profile-search",
     { q: query, limit: Math.min(Math.max(limit, 1), 25) },
+    { timeoutMs: 40_000, ttlMs: 5 * 60_000, retry: false },
+  );
+  if (!run.ok) return [];
+  return peopleFromApialt(run.data);
+}
+
+/** LinkedIn people search. Keep quotes — `"Company"` beats a loose keyword match. */
+export async function apialtSearchPeople(q: string, limit = 15): Promise<DiscoverPerson[]> {
+  const query = q.trim();
+  if (query.replace(/"/g, "").length < 2) return [];
+  const run = await apialtRun(
+    "linkedin.search",
+    { q: query, category: "people", limit: Math.min(Math.max(limit, 1), 25) },
     { timeoutMs: 40_000, ttlMs: 5 * 60_000, retry: false },
   );
   if (!run.ok) return [];

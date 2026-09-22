@@ -324,32 +324,36 @@ export type CompanyIcpSeed = {
 };
 
 const STOP_KW =
-  /^(the|and|with|for|our|from|that|this|their|your|are|was|not|all|into|over|also|have|been|made|will|just|company|group|pvt|ltd|llc|inc|limited)$/i;
+  /^(the|and|with|for|our|from|that|this|their|your|are|was|not|all|into|over|also|have|been|made|will|just|company|group|pvt|ltd|llc|inc|limited|transform|empower|helping|passionate|digital|solutions|services|global|using|based|across|first|built)$/i;
 
 function nicheKeywords(seed: CompanyIcpSeed): string[] {
-  const blob = `${seed.description ?? ""} ${(seed.tags ?? []).join(" ")} ${seed.industry ?? ""}`;
+  const brand = compact(seed.name).split(/\s+/);
+  const fromTags = (seed.tags ?? [])
+    .map((t) => t.toLowerCase().trim())
+    .filter((t) => t.length >= 4 && t.length <= 40 && !STOP_KW.test(t) && !brand.includes(t));
+  const blob = `${seed.description ?? ""} ${seed.industry ?? ""}`;
   const words = blob
     .toLowerCase()
     .replace(/[^a-z0-9+ ]/g, " ")
     .split(/\s+/)
-    .filter((w) => w.length >= 5 && !STOP_KW.test(w));
+    .filter((w) => w.length >= 5 && !STOP_KW.test(w) && !brand.includes(w));
   const preferred = [
+    "salesforce",
+    "sitetracker",
+    "appian",
     "loyalty",
     "membership",
     "subscription",
     "hospitality",
     "engagement",
-    "monetisation",
-    "monetization",
     "kubernetes",
     "finops",
     "dental",
-    "realestate",
-  ].filter((w) => blob.toLowerCase().includes(w));
-  const out = [...preferred];
+  ].filter((w) => blob.toLowerCase().includes(w) || fromTags.some((t) => t.includes(w)));
+  const out = [...preferred, ...fromTags];
   for (const w of words) {
     if (out.length >= 6) break;
-    if (!out.includes(w) && w !== compact(seed.domain.split(".")[0] ?? "")) out.push(w);
+    if (!out.includes(w)) out.push(w);
   }
   return [...new Set(out)].slice(0, 6);
 }

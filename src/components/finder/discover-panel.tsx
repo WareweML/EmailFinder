@@ -12,6 +12,7 @@ import {
   LANGUAGES,
   TENURE,
   YEARS_EXPERIENCE,
+  LINKEDIN_FUNCTIONS,
 } from "@/lib/email-finder/linkedin-facets";
 import {
   discoverCompaniesFn,
@@ -19,7 +20,6 @@ import {
   discoverPeopleFn,
   enrichPeopleFn,
 } from "@/lib/email-finder/server";
-import { LINKEDIN_FUNCTIONS } from "@/lib/email-finder/linkedin-company";
 import {
   clearIcpDiscoverAutoSearch,
   ICP_DISCOVER_EVENT,

@@ -86,7 +86,7 @@ export function DomainResults({ result }: { result: WaterfallDomainResult }) {
       <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
         <p className="font-medium">
           {named.length} live people
-          {result.headcount ? ` · LinkedIn lists ${result.headcount}` : ""}
+          {result.headcount ? ` · LinkedIn company size ${result.headcount}` : ""}
           {(result as { titleFilter?: string }).titleFilter
             ? ` · filter: ${(result as { titleFilter?: string }).titleFilter}`
             : ""}
@@ -369,8 +369,11 @@ function PeopleByDept({ people }: { people: Named[] }) {
                       )}
                     </div>
                     <p className="pl-5 text-xs text-fg-muted truncate">
-                      {[p.title, p.location].filter(Boolean).join(" · ") ||
-                        "Title not on public card"}
+                      {p.title
+                        ? [p.title, p.location].filter(Boolean).join(" · ")
+                        : p.location
+                          ? `Title not on public card · ${p.location}`
+                          : "Title not on public card"}
                     </p>
                   </div>
                   <div className="flex items-center gap-2 text-xs shrink-0">

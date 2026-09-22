@@ -124,13 +124,6 @@ export async function enrichCompany(
           legalName = cand;
         }
       }
-      // fallback: "Warewe Consultancy Private Limited"
-      if (!legalName) {
-        const m2 = text.match(
-          /\b(Warewe\s+Consultancy\s+Private\s+Limited)\b/i,
-        );
-        if (m2) legalName = m2[1];
-      }
     }
     const cinM = text.match(/\b([UL]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6})\b/);
     if (cinM) cin = cinM[1];

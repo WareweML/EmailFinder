@@ -1,10 +1,18 @@
 /**
  * Fast tech fingerprint:
- *   1. W3Techs named stack (open, ~1s)
- *   2. Live headers + MX
- *   3. Job/careers evidence for backend tools Hunter shows via BuiltWith
- *   4. BuiltWith Domain API if BUILTWITH_API_KEY is set
+ *   1. BuiltWith public profile (builtwith.com/{domain}) — free, detailed
+ *   2. W3Techs named stack
+ *   3. Live headers + MX
+ *   4. Job/careers evidence
+ *   5. BuiltWith Domain API if BUILTWITH_API_KEY is set
  */
+
+import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 export interface TechHit {
   name: string;
@@ -57,6 +65,38 @@ const CAT_MAP: Record<string, string> = {
   "javascript content delivery networks": "Infrastructure",
 };
 
+const BW_CAT: Record<string, string> = {
+  operations: "Operational Stack",
+  cms: "Content Management System",
+  analytics: "Analytics",
+  framework: "Frameworks",
+  javascript: "JavaScript",
+  ads: "Advertising",
+  hosting: "Cloud Computing Services",
+  mx: "Email",
+  ssl: "Security",
+  widgets: "Widgets",
+  cdn: "CDN",
+  cdns: "CDN",
+  "web-server": "Web Server",
+  media: "Media",
+};
+
+const BW_SKIP_CAT = /^(link|language|mobile|registrar|server|web-master|feeds|encoding|docinfo|copyright|ns)$/i;
+
+const BW_SKIP_NAME =
+  /^(about cookies|apple whitelist|crux|cloudflare radar|common.?crawl|viewport meta|iphone|ipv6|hsts|ssl by default|dmarc|spf|english -|ai generated|multilingual|font awesome|google font|us privacy|getty|technical job|wikipedia|all about cookies|careers|sustainability|events page|artificial intelligence|modern slavery|verified|google webmaster|synergy wholesale|australian corporate|australian server|u\.s\. server|bootstrapcdn|cdn js|ajax libraries|content delivery network|intersection observer|javascript modules|google hosted|globalsign domain|pre year|facebook$|linkedin$|twitter$|youtube|do not sell|accessibility|login or signup|^x$)/i;
+
+function env(key: string): string {
+  if (process.env[key]) return process.env[key]!;
+  try {
+    const m = readFileSync("/workspace/.env", "utf8").match(new RegExp(`^${key}=(.*)$`, "m"));
+    return m?.[1]?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
 export async function detectTechStack(
   domainInput: string,
   extraText = "",
@@ -71,20 +111,28 @@ export async function detectTechStack(
   const seen = new Set<string>();
 
   const add = (name: string, category: string, evidence: string, confidence: number) => {
-    const key = name.replace(/\s+CMS$/i, "").trim();
+    const key = name.replace(/\s+CMS$/i, "").replace(/\s+\d+(\.\d+)+$/, "").trim();
     if (!key || seen.has(key.toLowerCase())) return;
+    if (
+      /^(hsts|http\/2|http\/3|ipv6|open graph|json-ld|strict transport|microsoft (excel|word|office|powerpoint))$/i.test(
+        key,
+      )
+    )
+      return;
+    if (BW_SKIP_NAME.test(key)) return;
     seen.add(key.toLowerCase());
     technologies.push({ name: key, category, evidence, confidence });
   };
 
-  const [w3, bw, live, jobs] = await Promise.all([
+  const [bwPublic, w3, bw, live, jobs] = await Promise.all([
+    builtwithPublic(domain),
     w3techs(domain),
     builtwithDomain(domain),
     liveHeaders(domain),
     jobEvidence(domain, extraText),
   ]);
-  sources.push(...w3.sources, ...bw.sources, ...live.sources, ...jobs.sources);
-  for (const t of [...bw.hits, ...w3.hits, ...live.hits]) {
+  sources.push(...bwPublic.sources, ...w3.sources, ...bw.sources, ...live.sources, ...jobs.sources);
+  for (const t of [...bwPublic.hits, ...bw.hits, ...w3.hits, ...live.hits]) {
     add(t.name, t.category, t.evidence, t.confidence);
   }
   const cheapHost = technologies.some((t) =>
@@ -103,7 +151,76 @@ export async function detectTechStack(
     }
   }
   technologies.sort((a, b) => b.confidence - a.confidence);
-  return { domain, technologies, durationMs: Date.now() - t0, sources };
+  return { domain, technologies: technologies.slice(0, 40), durationMs: Date.now() - t0, sources };
+}
+
+export function parseBuiltWithHtml(html: string): TechHit[] {
+  const hits: TechHit[] = [];
+  const seen = new Set<string>();
+  for (const m of html.matchAll(
+    /<h2 class="widget-title"><a href="\/\/trends\.builtwith\.com\/([^"/]+)\/[^"]+"[^>]*>([^<]{2,90})<\/a><\/h2>/gi,
+  )) {
+    const catKey = m[1]!.toLowerCase();
+    const name = m[2]!.replace(/\s+/g, " ").trim();
+    if (BW_SKIP_CAT.test(catKey) || BW_SKIP_NAME.test(name)) continue;
+    if (/jquery \d/i.test(name)) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    hits.push({
+      name,
+      category: BW_CAT[catKey] ?? m[1]!,
+      evidence: "BuiltWith",
+      confidence: catKey === "operations" || catKey === "cms" ? 94 : 90,
+    });
+  }
+  return hits;
+}
+
+async function builtwithPublic(domain: string): Promise<{ hits: TechHit[]; sources: string[] }> {
+  const html = await fetchBuiltWithPage(domain);
+  if (!html || /human-test|Select both images/i.test(html)) return { hits: [], sources: [] };
+  const hits = parseBuiltWithHtml(html);
+  return hits.length
+    ? { hits, sources: [`https://builtwith.com/${domain}`] }
+    : { hits: [], sources: [] };
+}
+
+async function fetchBuiltWithPage(domain: string): Promise<string | null> {
+  const url = `https://builtwith.com/${domain}`;
+  const ua =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+  const line = env("OKK_PROXY");
+  if (line) {
+    const parts = line.split(":");
+    if (parts.length >= 4) {
+      const [host, port, user, ...rest] = parts;
+      const pass = rest.join(":");
+      const sid = randomBytes(6).toString("hex");
+      const user2 = (user ?? "").replace(/sessid-[A-Za-z0-9]+/i, `sessid-${sid}`);
+      try {
+        const { stdout } = await execFileAsync(
+          "curl",
+          ["-sS", "-m", "18", "-L", "--max-redirs", "2", "--compressed", "-A", ua, "-x", `http://${user2}:${pass}@${host}:${port}`, url],
+          { maxBuffer: 2_500_000, timeout: 22_000 },
+        );
+        if (stdout.length > 20_000 && /widget-title/i.test(stdout)) return stdout;
+      } catch {
+        /* proxy optional */
+      }
+    }
+  }
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(10_000),
+      headers: { "User-Agent": ua, Accept: "text/html" },
+    });
+    const html = await res.text();
+    if (html.length > 20_000 && /widget-title/i.test(html)) return html;
+  } catch {
+    /* */
+  }
+  return null;
 }
 
 async function w3techs(domain: string): Promise<{ hits: TechHit[]; sources: string[] }> {
@@ -191,10 +308,6 @@ async function liveHeaders(domain: string): Promise<{ hits: TechHit[]; sources: 
     const mxLine = mx.map((m) => m.exchange).join(" ");
     if (/outlook|protection\.outlook|microsoft/i.test(mxLine)) {
       add("Microsoft 365", "Productivity", "MX Outlook", 92);
-      add("Microsoft Excel", "Productivity", "Microsoft 365 suite", 70);
-      add("Microsoft Office", "Productivity", "Microsoft 365 suite", 70);
-      add("Microsoft Word", "Productivity", "Microsoft 365 suite", 68);
-      add("Microsoft PowerPoint", "Productivity", "Microsoft 365 suite", 68);
     }
   } catch {
     /* dns optional */
@@ -211,7 +324,6 @@ async function liveHeaders(domain: string): Promise<{ hits: TechHit[]; sources: 
     });
     const hdr = [...res.headers.entries()].map(([k, v]) => `${k}: ${v}`).join("\n");
     const html = (await res.text()).slice(0, 80_000);
-    if (/strict-transport-security/i.test(hdr)) add("HSTS", "Security", "HSTS header", 95);
     if (/x-azure-ref|azurefd\.net/i.test(hdr)) {
       add("Azure", "Cloud Computing Services", "x-azure-ref", 92);
       add("Azure Front Door", "Cloud Computing Services", "x-azure-ref", 90);

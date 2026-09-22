@@ -9,6 +9,8 @@ import { readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import type { DiscoverPerson } from "./voyager-search";
 import { companyNameFitsDomain } from "./identity-lock";
+import { TECH_NOT_COMPANY, SLOGAN, cleanRoleTitle, companyFromHeadline } from "./role-title";
+export { cleanRoleTitle, pickJobTitle, companyFromHeadline } from "./role-title";
 
 const execFileAsync = promisify(execFile);
 const UA =
@@ -78,55 +80,6 @@ async function fetchViaOkk(url: string): Promise<string | null> {
     }
   }
   return null;
-}
-
-const TECH_NOT_COMPANY =
-  /^(k8s|kubernetes|gpu|aws|azure|gcp|linux|docker|terraform|python|java|react|node\.?js|ai|ml|cloud|devops)$/i;
-const SLOGAN =
-  /\b(temple|passionate|helping|love to|enthusiast|ninja|guru|is my|advocate|geek|wizard|i help|we help|stop blending)\b/i;
-const ROLE_WORD =
-  /\b(manager|director|engineer|officer|lead|vp|head|founder|writer|specialist|consultant|analyst|executive|designer|marketer|strategist|officer|intern|associate|partner|owner|ceo|cto|cfo|coo|president)\b/i;
-
-export function cleanRoleTitle(
-  raw?: string,
-  companyHint?: string,
-): string | undefined {
-  if (!raw) return undefined;
-  let t = raw
-    .replace(/[^\w\s.&+/()#'-]/g, " ")
-    .replace(/\s+/g, " ")
-    .replace(/\s*\|\s*LinkedIn.*$/i, "")
-    .trim();
-  if (!t || t.length < 3) return undefined;
-  if (TECH_NOT_COMPANY.test(t)) return undefined;
-  if (/^(i|we)\s/i.test(t) && !ROLE_WORD.test(t)) return undefined;
-  if (t.split(/\s+/).length > 8 && !ROLE_WORD.test(t)) return undefined;
-  const at = t.match(/^(.*?)\s+(?:at|@)\s+(.+)$/i);
-  if (at) {
-    const role = at[1]!.trim();
-    const co = at[2]!.replace(/\s*[-–|].*$/, "").trim();
-    if (TECH_NOT_COMPANY.test(co)) return role || undefined;
-    if (SLOGAN.test(role) && !/\b(manager|director|engineer|officer|lead|vp|head|founder)\b/i.test(role)) {
-      return undefined;
-    }
-    return role || undefined;
-  }
-  if (SLOGAN.test(t) && !/\b(manager|director|engineer|officer|lead|vp|head|founder|cto|ceo)\b/i.test(t)) {
-    return undefined;
-  }
-  if (companyHint) {
-    t = t.replace(new RegExp(`\\s+at\\s+${companyHint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}.*$`, "i"), "").trim();
-  }
-  return t.slice(0, 80) || undefined;
-}
-
-export function companyFromHeadline(raw?: string): string | undefined {
-  if (!raw) return undefined;
-  const at = raw.match(/\s+(?:at|@)\s+([A-Z][\w.&' -]{1,40})/i);
-  const co = at?.[1]?.replace(/\s*[-–|].*$/, "").trim();
-  if (!co || TECH_NOT_COMPANY.test(co) || /linkedin/i.test(co)) return undefined;
-  if (SLOGAN.test(co)) return undefined;
-  return co;
 }
 
 export type PublicProfile = {

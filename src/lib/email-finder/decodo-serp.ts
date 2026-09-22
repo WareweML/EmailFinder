@@ -106,14 +106,20 @@ function parseHead(row: Organic): DecodoHit | null {
   if (!isPersonSlug(slug)) return null;
   if (isDirectorySpam(row.title ?? "", url)) return null;
   const head = (row.title ?? "")
+    .replace(/\s*[-–|]\s*LinkedIn\b.*$/i, "")
     .replace(/\s*\|\s*LinkedIn.*$/i, "")
     .replace(/\s+/g, " ")
     .trim();
   const bits = head.split(/\s*[-–|]\s*/);
   const name = (bits[0] ?? "").trim();
   if (!isPlausibleName(name)) return null;
-  const title = bits.slice(1).join(" - ").replace(/\s+at\s*$/i, "").trim();
-  return { name, title: title || undefined, slug, url, linkedinUrl: `https://www.linkedin.com/in/${slug}/` };
+  const rest = bits
+    .slice(1)
+    .filter((b) => !/^linkedin$/i.test(b.trim()))
+    .join(" - ")
+    .replace(/\s+at\s*$/i, "")
+    .trim();
+  return { name, title: rest || undefined, slug, url, linkedinUrl: `https://www.linkedin.com/in/${slug}/` };
 }
 
 export function peopleFromOrganic(rows: Organic[], companyName: string, domain?: string): DecodoHit[] {
@@ -128,10 +134,16 @@ export function peopleFromOrganic(rows: Organic[], companyName: string, domain?:
     if (companyName.length >= 3 && !onTitle && !onBlob) continue;
     if (otherEmployerInTitle(row.title ?? "", companyName, domain)) continue;
     if (/\b(former|ex-|previously|alumni)\b/i.test(blob)) continue;
-    if (!parsed.title) {
+    const companyish =
+      parsed.title &&
+      companyName.length >= 3 &&
+      parsed.title.toLowerCase().replace(/[^a-z0-9]+/g, "") ===
+        companyName.toLowerCase().replace(/[^a-z0-9]+/g, "");
+    if (!parsed.title || companyish) {
       const esc = companyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const at = blob.match(new RegExp(`([A-Za-z][A-Za-z0-9+ /,&'’.-]{2,70}?)\\s+at\\s+${esc}`, "i"));
       if (at?.[1] && !/linkedin|profile|view/i.test(at[1])) parsed.title = at[1].trim();
+      else if (companyish) parsed.title = undefined;
     }
     seen.add(parsed.slug);
     out.push(parsed);

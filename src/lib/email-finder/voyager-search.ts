@@ -201,8 +201,19 @@ function matchesDiscoverFilters(
   if (f.title && !includesCI(p.title, f.title)) return false;
   if (f.keywords) {
     const needles = keywordNeedles(f.keywords);
-    const field = `${p.title ?? ""} ${p.department ?? ""}`.toLowerCase();
-    if (!needles.some((n) => field.includes(n))) return false;
+    const field =
+      `${p.name ?? ""} ${p.title ?? ""} ${p.company ?? ""} ${p.department ?? ""}`.toLowerCase();
+    const tokens = f.keywords
+      .toLowerCase()
+      .replace(/"/g, "")
+      .split(/\s+/)
+      .filter((t) => t.length > 1);
+    const name = (p.name ?? "").toLowerCase();
+    const nameHits = tokens.filter((t) => name.split(/\s+/).includes(t));
+    const ok =
+      nameHits.length >= 2 ||
+      needles.some((n) => n.length > 1 && field.includes(n));
+    if (!ok) return false;
   }
   if (f.companyName && !includesCI(p.company, f.companyName)) return false;
   if (f.domain) {

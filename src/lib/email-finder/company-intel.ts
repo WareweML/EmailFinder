@@ -102,16 +102,6 @@ function isPersonName(name: string): boolean {
   return parts.length >= 2 && parts.length <= 4 && name.length < 45;
 }
 
-const KNOWN_PRODUCT_SLUGS = [
-  "hetrolinks",
-  "serpwe",
-  "sellerwe",
-  "duptext",
-  "content-business-toolbox",
-  "e-comm-business-toolbox",
-  "established-websites-for-sale",
-];
-
 export async function gatherCompanyIntel(
   domainInput: string,
 ): Promise<CompanyIntel> {
@@ -122,10 +112,13 @@ export async function gatherCompanyIntel(
   const base = `https://${domain}`;
   const pagePaths = [
     "/",
+    "/about/",
     "/about-us/",
+    "/contact/",
     "/contact-us/",
+    "/team/",
+    "/careers/",
     "/blog/",
-    ...KNOWN_PRODUCT_SLUGS.map((s) => `/${s}/`),
   ];
 
   const pages = await mapPool(pagePaths, 4, async (p) => {
@@ -167,9 +160,6 @@ export async function gatherCompanyIntel(
       if (md?.[1]) description = decodeEntities(md[1]).slice(0, 300);
     }
 
-    if (/Warewe\s+Consultancy\s+Private\s+Limited/i.test(text)) {
-      legalName = "Warewe Consultancy Private Limited";
-    }
     const cinM = text.match(/\b([UL]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6})\b/);
     if (cinM) cin = cinM[1];
 
@@ -233,67 +223,6 @@ export async function gatherCompanyIntel(
       }
       for (const m of text.matchAll(/(20\d{2})\s*\n\s*([^\n]{20,180})/g)) {
         timeline.push(`${m[1]}: ${m[2].trim()}`);
-      }
-      if (/Pushwe/i.test(text)) {
-        products.push({
-          name: "Pushwe",
-          slug: "pushwe",
-          url: page.url,
-          description:
-            "Historical: browser push-notification SaaS (company history / founder bio)",
-          status: "unknown",
-        });
-      }
-      if (/AutoSeoLinks/i.test(text)) {
-        products.push({
-          name: "AutoSeoLinks.com",
-          slug: "autoseolinks",
-          url: page.url,
-          description:
-            "Historical: SEO / traffic SaaS for webmasters (founder bio)",
-          status: "unknown",
-        });
-      }
-      if (/Buy1Get1\.in/i.test(text)) {
-        products.push({
-          name: "Buy1Get1.in",
-          slug: "buy1get1",
-          url: page.url,
-          description: "Historical: BOGO affiliate deals (founder bio)",
-          status: "unknown",
-        });
-      }
-    }
-
-    const slug = page.path.replace(/\//g, "");
-    if (KNOWN_PRODUCT_SLUGS.includes(slug)) {
-      let title =
-        decodeEntities(
-          (html.match(/<title[^>]*>([^<]+)/i)?.[1] ?? slug).split(
-            /[|\-–]/,
-          )[0] ?? slug,
-        ) || slug;
-      title = title.replace(/\s*Warewe\s*$/i, "").trim() || slug;
-      const coming = /coming soon/i.test(text);
-      const desc =
-        text
-          .split("\n")
-          .map((l) => l.trim())
-          .filter((l) => l.length > 40 && l.length < 220)
-          .find(
-            (l) =>
-              !/Shopify vs|Follow Us|All Rights|popular resources|Start free/i.test(
-                l,
-              ),
-          ) ?? "";
-      if (!products.some((p) => p.slug === slug)) {
-        products.push({
-          name: title,
-          slug,
-          url: page.url,
-          description: desc,
-          status: coming ? "coming_soon" : "live",
-        });
       }
     }
   }
@@ -391,9 +320,11 @@ export async function gatherCompanyIntel(
   }
 
   const connections: string[] = [];
-  connections.push(
-    `${legalName ?? brand} (${domain}) is a Gurgaon/Delhi SaaS company building growth toolboxes for content + e-comm brands.`,
-  );
+  if (description) {
+    connections.push(`${legalName ?? companyName ?? brand} (${domain}): ${description}`);
+  } else {
+    connections.push(`${legalName ?? companyName ?? brand} (${domain})`);
+  }
   if (products.length) {
     connections.push(
       `Product map: ${products.map((p) => `${p.name}${p.status === "coming_soon" ? " (soon)" : p.status === "unknown" ? " (historical)" : ""}`).join("; ")}.`,

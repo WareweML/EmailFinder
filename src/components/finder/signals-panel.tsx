@@ -28,7 +28,7 @@ export function SignalsPanel() {
   const [kind, setKind] = useState<SignalKind>("topic_intent");
   const [target, setTarget] = useState<SignalTarget>("companies");
   const [name, setName] = useState("");
-  const [entities, setEntities] = useState("ghd.com\nstripe.com");
+  const [entities, setEntities] = useState("");
   const [topics, setTopics] = useState("AI\ncloud cost\nkubernetes");
   const [query, setQuery] = useState("");
   const [url, setUrl] = useState("");

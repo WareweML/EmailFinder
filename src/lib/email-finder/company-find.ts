@@ -604,6 +604,8 @@ function isCompanyName(s: string | null | undefined): s is string {
   if (t.length < 2 || t.length > 80) return false;
   if (/^UC[\w-]{20,}$/i.test(t)) return false;
   if (/^(reel|reels|share|watch|posts|photos?|about|privacy|login|home|explore)$/i.test(t)) return false;
+  if (/^(youtube|facebook|instagram|twitter|linkedin|google|microsoft|apple|amazon|tiktok|whatsapp|github)$/i.test(t))
+    return false;
   if (/^dr\.?\s+[a-z]/i.test(t) && !/\b(dental|clinic|hospital|solutions|care)\b/i.test(t)) return false;
   if (/sign in|cookie policy|user agreement|sitemap|^html>?$|linkedin'?s user/i.test(t)) return false;
   if (/^https?:/i.test(t) || /youtube\.com|youtu\.be/i.test(t)) return false;
@@ -1181,7 +1183,10 @@ export async function findCompany(domainInput: string): Promise<CompanyFindRespo
     (li?.name && isCompanyName(li.name) ? li.name : null) ||
     (site.name && isCompanyName(site.name) ? site.name : null) ||
     hint
-  ).replace(/[.\s]+$/, "");
+  )
+    .replace(/[.\s]+$/, "")
+    .split(/\s*[|•]\s*/)[0]!
+    .trim();
   const social = dedupeSocial(site.social, brandRe);
   const akaStems = [
     ...new Set(
@@ -1369,7 +1374,12 @@ export async function findCompany(domainInput: string): Promise<CompanyFindRespo
   ];
   const alternativeDomains = [
     ...new Set(
-      [...altDomains, ...related.map((r) => r.domain)].filter((d) => d && d !== domain),
+      [...altDomains, ...related.map((r) => r.domain)].filter(
+        (d) =>
+          d &&
+          d !== domain &&
+          !/^(youtube|facebook|instagram|twitter|linkedin|google|microsoft|apple|amazon)\.com$/i.test(d),
+      ),
     ),
   ];
   const liId = (li as { linkedinId?: string } | null)?.linkedinId ?? null;

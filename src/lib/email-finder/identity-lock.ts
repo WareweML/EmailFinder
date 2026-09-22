@@ -32,7 +32,46 @@ export function profileSlugFromUrl(url: string): string | null {
   return isPersonSlug(slug) ? slug : null;
 }
 
+const LEGAL_TOKEN =
+  /^(pty|ltd|limited|inc|llc|llp|plc|co|corp|corporation|company|holdings|group|gmbh|pvt|private|sa|ag|bv|nv)$/i;
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function stripLegalTokens(s: string): string {
+  return s
+    .replace(/\b(pty\.?|ltd\.?|limited|inc\.?|llc|llp|plc|corp\.?|corporation|gmbh|pvt\.?|private limited|holdings|group)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Official name is a prefix of a longer employer string with non-legal extra
+ *  tokens → different company (ACME vs ACME Unlimited). Legal suffixes stay. */
+export function otherBrandEntity(
+  blob: string,
+  companyName: string,
+  domain?: string | null,
+): string | null {
+  const official = stripLegalTokens((companyName.split(/[|\-–]/)[0] ?? companyName).trim());
+  const brand = official.split(/\s+/)[0] ?? "";
+  if (brand.length < 2) return null;
+  const re = new RegExp(
+    `\\b${escapeRe(brand)}\\s+([A-Za-z][A-Za-z0-9&'-]{1,24})\\b`,
+    "i",
+  );
+  const m = blob.match(re);
+  if (!m?.[1] || LEGAL_TOKEN.test(m[1])) return null;
+  const named = `${brand} ${m[1]}`;
+  const extra = compact(stripLegalTokens(named));
+  const base = compact(official);
+  if (!extra.startsWith(base) || extra.length <= base.length) return null;
+  if (domain && extra === compact(domain.split(".")[0] ?? "")) return null;
+  return named;
+}
+
 export function companyOnCard(blob: string, companyName: string, domain?: string | null): boolean {
+  if (otherBrandEntity(blob, companyName, domain)) return false;
   const hay = compact(blob);
   const brand = compact(companyName);
   if (brand.length >= 5 && hay.includes(brand)) return true;
@@ -41,6 +80,9 @@ export function companyOnCard(blob: string, companyName: string, domain?: string
     if (d.length >= 6 && hay.includes(d)) return true;
   }
   const stem = compact((domain ?? "").split(".")[0] ?? "");
+  if (stem.length >= 2 && stem.length <= 4) {
+    return new RegExp(`\\b${escapeRe(stem)}\\b`, "i").test(blob);
+  }
   if (stem.length >= 5 && hay.includes(stem)) {
     if (domain && isCollisionBrand(domain)) return false;
     return true;
@@ -69,6 +111,32 @@ export function otherEmployerInTitle(title: string, companyName: string, domain?
     return named;
   }
   return null;
+}
+
+const C_SUITE =
+  /\b(ceo|cfo|cto|coo|cmo|cio|chief\s+\w+\s+officer|co-?founder|founder|owner|president|chairman|vice[-\s]?president|\bvp\b|area vice)\b/i;
+const IC_ROLE =
+  /\b(engineer(?:ing)?|developer|analyst|intern|architect|specialist|consultant|qa\b|quality|sde\d*|salesforce|devops|programmer|tester|lead(?:er)?|manager|administrator|designer)\b/i;
+
+/** Keep a people-search hit only if this employer is on the card, or it's a
+ *  role-only IC title on a non-acronym brand. C-suite without the company
+ *  is some other firm's CEO. */
+export function keepCompanyPerson(
+  title: string | undefined,
+  companyName: string,
+  domain?: string | null,
+): boolean {
+  const t = (title ?? "").replace(/\s*\|\s*LinkedIn.*$/i, "").trim();
+  if (companyOnCard(t, companyName, domain) || employerInTitle(t, companyName, domain)) {
+    return !otherEmployerInTitle(t, companyName, domain);
+  }
+  if (otherEmployerInTitle(t, companyName, domain)) return false;
+  if (otherBrandEntity(t, companyName, domain)) return false;
+  if (!t) return true;
+  if (domain && isCollisionBrand(domain)) return false;
+  if (C_SUITE.test(t)) return false;
+  if (/\b(aspiring|student|storyteller|enthusiast|helping)\b/i.test(t)) return false;
+  return IC_ROLE.test(t);
 }
 
 export function identityLocked(opts: {
@@ -213,6 +281,7 @@ export function coreNameTokens(name: string): string[] {
  */
 export function isCollisionBrand(domain: string): boolean {
   const stem = (domain.split(".")[0] ?? "").toLowerCase();
+  if (stem.length <= 4) return true;
   const parts = spacedBrand(stem).split(/\s+/).filter(Boolean);
   if (parts.length === 2 && parts[0]!.length <= 8 && GENERIC_TAIL.test(parts[1]!)) return true;
   return false;

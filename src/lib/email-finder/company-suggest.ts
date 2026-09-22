@@ -34,14 +34,6 @@ export interface CompanySuggestion {
   logoUrl?: string;
 }
 
-const LOCAL_ALIASES: Array<{ aliases: string[]; name: string; domain: string }> =
-  [
-    { aliases: ["warewe", "ware we"], name: "Warewe", domain: "warewe.com" },
-    { aliases: ["stripe"], name: "Stripe", domain: "stripe.com" },
-    { aliases: ["ghd"], name: "GHD", domain: "ghd.com" },
-    { aliases: ["aidacare", "aida care"], name: "Aidacare", domain: "aidacare.com.au" },
-  ];
-
 const COMPANY_TAILS = [
   "solutions",
   "solution",
@@ -604,12 +596,6 @@ export async function suggestCompanies(
   };
   for (const h of packs.flat()) add(h);
 
-  for (const a of LOCAL_ALIASES) {
-    if (a.aliases.some((x) => compact(q).startsWith(x) || x.startsWith(compact(q)))) {
-      add({ name: a.name, domain: a.domain, confidence: 96, source: "seed" });
-    }
-  }
-
   const ranked = [...bag.values()].sort(
     (a, b) => b.score - a.score || b.hit.confidence - a.hit.confidence,
   );
@@ -940,7 +926,7 @@ export async function relatedCompanyDomains(opts: {
   description?: string;
 }): Promise<RelatedCompanyDomain[]> {
   const domain = opts.domain.toLowerCase().replace(/^www\./, "");
-  const key = `v3:${domain}:${opts.name.toLowerCase()}`;
+  const key = `v4:${domain}:${opts.name.toLowerCase()}`;
   const hit = relatedCache.get(key);
   if (hit) return hit;
 
@@ -961,6 +947,15 @@ export async function relatedCompanyDomains(opts: {
       const hosts = [...new Set([`${slugName}.com`, `${slugName}.in`, `${slugName}.co`])];
       for (const host of hosts) {
         if (seen.has(host)) continue;
+        if (JUNK_HOST.has(host)) continue;
+        if (/^(youtube|facebook|instagram|twitter|linkedin|google|microsoft|apple|amazon|tiktok|whatsapp|github|wikipedia)$/i.test(slugName))
+          continue;
+        if (
+          !p.previous &&
+          nameCloseness(p.name, opts.name) < 50 &&
+          !companyNameFitsDomain(opts.name, host)
+        )
+          continue;
         const dns = await dohLive(host);
         if (!dns) continue;
         let hasMx = false;

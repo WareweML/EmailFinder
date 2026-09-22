@@ -111,6 +111,125 @@ async function nextProps(url: string): Promise<Record<string, unknown> | null> {
   }
 }
 
+const GQL = "https://prod-graphql-api.theorg.com/graphql";
+
+type GqlTeam = { slug?: string; name?: string; memberCount?: number };
+type GqlMember = { fullName?: string; slug?: string; role?: string };
+
+async function theOrgGql<T>(
+  operationName: string,
+  query: string,
+  variables: Record<string, unknown>,
+): Promise<T | null> {
+  try {
+    const res = await fetch(GQL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "User-Agent": UA,
+        Origin: "https://theorg.com",
+        Referer: "https://theorg.com/",
+        "X-Org-Client": "web",
+        "X-Operation-Name": operationName,
+      },
+      body: JSON.stringify({ operationName, query, variables }),
+      signal: AbortSignal.timeout(18_000),
+    });
+    if (!res.ok) return null;
+    const j = (await res.json()) as { data?: T };
+    return j.data ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function graphqlAllTeams(companySlug: string): Promise<GqlTeam[]> {
+  const q = `query teamsByCompany($companySlug: String!, $limit: Int!, $offset: Int!) {
+    teamsByCompany(companySlug: $companySlug, limit: $limit, offset: $offset) {
+      slug name memberCount
+    }
+  }`;
+  const out: GqlTeam[] = [];
+  for (let offset = 0; offset < 400; offset += 50) {
+    const data = await theOrgGql<{ teamsByCompany?: GqlTeam[] }>(
+      "teamsByCompany",
+      q,
+      { companySlug, limit: 50, offset },
+    );
+    const page = data?.teamsByCompany ?? [];
+    if (!page.length) break;
+    out.push(...page);
+    if (page.length < 50) break;
+  }
+  return out;
+}
+
+function pushGqlMember(
+  m: GqlMember,
+  hits: TheOrgHit[],
+  seen: Set<string>,
+  team: string | undefined,
+  company: string | undefined,
+  domain: string | undefined,
+) {
+  const name = (m.fullName ?? "").trim();
+  const slug = (m.slug ?? "").trim();
+  if (!name || !slug || name.split(/\s+/).length < 2 || seen.has(slug)) return;
+  seen.add(slug);
+  hits.push({
+    name,
+    title: m.role,
+    slug,
+    url: `https://theorg.com/org/_/p/${slug}`,
+    team,
+    company,
+    domain,
+  });
+}
+
+/** Public GraphQL: every team, first 50 members each (offset>0 is login-walled). */
+async function graphqlTeamPeople(
+  companySlug: string,
+  hits: TheOrgHit[],
+  seen: Set<string>,
+  company: string | undefined,
+  domain: string | undefined,
+  deadline: number,
+): Promise<number> {
+  const teams = await graphqlAllTeams(companySlug);
+  if (!teams.length) return 0;
+  const q = `query team($companySlug: String, $teamSlug: String!, $memberLimit: Int, $memberOffset: Int) {
+    team(companySlug: $companySlug, teamSlug: $teamSlug) {
+      slug name memberCount
+      members(limit: $memberLimit, offset: $memberOffset) {
+        fullName slug role id
+      }
+    }
+  }`;
+  let i = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(12, teams.length) }, async () => {
+      while (i < teams.length && (!deadline || Date.now() < deadline)) {
+        const t = teams[i++]!;
+        if (!t.slug) continue;
+        const data = await theOrgGql<{
+          team?: { name?: string; members?: GqlMember[] };
+        }>("team", q, {
+          companySlug,
+          teamSlug: t.slug,
+          memberLimit: 50,
+          memberOffset: 0,
+        });
+        for (const m of data?.team?.members ?? []) {
+          pushGqlMember(m, hits, seen, data?.team?.name ?? t.name, company, domain);
+        }
+      }
+    }),
+  );
+  return teams.length;
+}
+
 function walkPeople(
   node: unknown,
   out: TheOrgHit[],
@@ -264,6 +383,9 @@ async function peopleFromSlug(
   const hits: TheOrgHit[] = [];
   const seen = new Set<string>();
   walkPeople(props, hits, seen, undefined, company, domain);
+  const gqlTeams = await graphqlTeamPeople(slug, hits, seen, company, domain, deadline).catch(
+    () => 0,
+  );
   const teams = (props.initialTeams as Array<{ slug?: string }> | undefined) ?? [];
   const offices = (co.offices ?? []).map((o) => o.slug).filter(Boolean) as string[];
   const relatedRaw = (props.relatedCompanies as Array<{ name?: string; social?: { websiteUrl?: string } }>) ?? [];
@@ -274,6 +396,9 @@ async function peopleFromSlug(
     }))
     .filter((r) => r.name);
 
+  if (gqlTeams > 0 && hits.length > 80) {
+    return { hits, related };
+  }
   const extra = await allTeamSlugs(
     slug,
     [...teams.map((t) => t.slug || ""), ...TEAM_GUESSES],
@@ -350,7 +475,7 @@ export async function theOrgPeople(
   related: Array<{ name: string; domain?: string }>;
 }> {
   const expect = domain.replace(/^www\./, "").toLowerCase() || undefined;
-  const deadline = Date.now() + 50_000;
+  const deadline = Date.now() + 90_000;
   for (const s of slugCandidates(domain, companyName)) {
     const props = await nextProps(`https://theorg.com/org/${s}`);
     if (!props?.initialCompany) continue;
